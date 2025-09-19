@@ -1,0 +1,115 @@
+name: Build Anki Deck on CSV Changes
+
+on:
+  push:
+    paths:
+      - 'workspace/cards.csv'
+      - 'workspace/media/**'
+    branches: [ main, develop ]
+  pull_request:
+    paths:
+      - 'workspace/cards.csv'
+      - 'workspace/media/**'
+    branches: [ main ]
+
+jobs:
+  build-deck:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+    
+    - name: Verify CSV exists
+      run: |
+        if [ ! -f "workspace/cards.csv" ]; then
+          echo "No cards.csv found, skipping deck build"
+          exit 0
+        fi
+        echo "Found cards.csv, proceeding with build"
+    
+    - name: Validate CSV
+      run: |
+        pdf2anki validate --csv workspace/cards.csv --verbose
+    
+    - name: Build Anki deck
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      run: |
+        pdf2anki build --config examples/config.example.yaml --verbose
+    
+    - name: Upload deck artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: anki-deck-${{ github.sha }}
+        path: workspace/deck.apkg
+        retention-days: 30
+    
+    - name: Upload manifest
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-manifest-${{ github.sha }}
+        path: workspace/manifest.json
+        retention-days: 7
+    
+    - name: Comment on PR (if applicable)
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read manifest if it exists
+          let manifestData = {};
+          try {
+            const manifest = fs.readFileSync('workspace/manifest.json', 'utf8');
+            manifestData = JSON.parse(manifest);
+          } catch (e) {
+            console.log('No manifest found');
+          }
+          
+          const totalCards = manifestData.processing?.total_cards || 'unknown';
+          const strategies = manifestData.processing?.strategies_used || [];
+          
+          const comment = `🎴 **Anki Deck Built Successfully**
+          
+          - **Total Cards**: ${totalCards}
+          - **Strategies Used**: ${strategies.join(', ') || 'none'}
+          - **Artifact**: anki-deck-${{ github.sha }}
+          
+          The deck has been built and is available as an artifact in this workflow run.`;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+    - name: Check deck size
+      run: |
+        if [ -f "workspace/deck.apkg" ]; then
+          DECK_SIZE=$(wc -c < "workspace/deck.apkg")
+          echo "Deck size: $DECK_SIZE bytes"
+          
+          # Warn if deck is suspiciously small
+          if [ $DECK_SIZE -lt 1000 ]; then
+            echo "::warning::Deck file is very small ($DECK_SIZE bytes), please verify"
+          fi
+          
+          # Warn if deck is very large
+          if [ $DECK_SIZE -gt 100000000 ]; then
+            echo "::warning::Deck file is very large ($DECK_SIZE bytes), consider optimization"
+          fi
+        fi
