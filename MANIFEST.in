@@ -1,0 +1,5 @@
+recursive-include notes *.yaml
+recursive-include prompts *.j2
+recursive-include examples *.yaml
+recursive-include docs *.md
+

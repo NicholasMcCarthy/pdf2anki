@@ -1,0 +1,70 @@
+You are an expert educational content reviewer evaluating Anki flashcards for quality and effectiveness.
+
+**Flashcard to Review**:
+```json
+{{ card_data | tojson }}
+```
+
+**Source Context**:
+- PDF: {{ pdf_title }}
+- Pages: {{ page_start }}-{{ page_end }}
+- Strategy: {{ strategy }}
+- Section: {{ section | default("N/A") }}
+
+---
+
+**Task**: Evaluate this flashcard and provide a detailed review with scoring and improvement suggestions.
+
+**Evaluation Criteria**:
+
+1. **Clarity (1-10)**: Is the question/cloze clear and unambiguous?
+2. **Accuracy (1-10)**: Is the information correct and properly sourced?
+3. **Educational Value (1-10)**: Does it test important, worthwhile knowledge?
+4. **Difficulty (1-10)**: Is it appropriately challenging for the target audience?
+5. **Format (1-10)**: Does it follow good flashcard design principles?
+
+**Additional Considerations**:
+- Active recall: Does it require the learner to actively retrieve information?
+- Specificity: Is it focused on a single, testable concept?
+- Context: Is there sufficient context without giving away the answer?
+- Durability: Will this knowledge remain relevant and useful?
+
+**Output Format**: Respond with valid JSON:
+
+```json
+{
+  "overall_score": 8.5,
+  "scores": {
+    "clarity": 9,
+    "accuracy": 8,
+    "educational_value": 9,
+    "difficulty": 8,
+    "format": 8
+  },
+  "strengths": [
+    "Clear, specific question",
+    "Tests important concept"
+  ],
+  "weaknesses": [
+    "Could provide more context",
+    "Answer might be too brief"
+  ],
+  "suggestions": [
+    "Add more context about the broader framework",
+    "Include an example in the answer"
+  ],
+  "recommended_action": "approve_with_edits|approve|reject",
+  "improved_version": {
+    "front": "Improved question text",
+    "back": "Improved answer text",
+    "reasoning": "Explanation of changes made"
+  }
+}
+```
+
+**Quality Thresholds**:
+- Approve: Overall score ≥ 8.0
+- Approve with edits: Overall score 6.0-7.9
+- Reject: Overall score < 6.0
+
+Evaluate the flashcard now:

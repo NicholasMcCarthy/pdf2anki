@@ -32,3 +32,4 @@ validation:
     extra: 500
   custom_validators:
     - validate_cloze_syntax  # Ensures proper {{c1::}} format
+

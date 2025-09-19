@@ -1,0 +1,102 @@
+anki:
+  deck_id: null
+  deck_name: PDF2Anki
+  deck_structure: "flat"
+  note_types: {}
+  preserve_latex: true
+deduplication:
+  embedding_threshold: 0.9
+  enabled: true
+  fuzzy_threshold: 0.85
+  index_path: null
+  policy: 'or'
+  scope_persistent: false
+  scope_within_run: true
+hallucination:
+  drop_on_failure: true
+  require_citations: true
+  verify_quotes: true
+ids:
+  salt: pdf2anki
+  strategy: "content_hash"
+ingestion:
+  mode: "entire"  # extract_text
+  chunking:
+    mode: "smart"
+    max_chunk_tokens: 4000
+    min_chunk_tokens: 100
+    overlap_tokens: 200
+    respect_page_bounds: true
+    tokens_per_chunk: 2000
+  extract_images: true
+  extract_tables: false
+  ocr_fallback: false
+inputs:
+  paths: ["pdfs/"]
+  patterns:
+  - '*.pdf'
+  recursive: true
+language: en
+llm:
+  api_key: null
+  base_url: null
+  max_retries: 3
+  max_tokens: null
+  model: gpt-4-1106-preview
+  provider: 'openai'
+  seed: null
+  temperature: 0.0
+  timeout: 120
+output:
+  apkg_path: 'workspace/deck.apkg'
+  csv_path: 'workspace/cards.csv'
+  manifest_path: 'workspace/manifest.json'
+  media_path:  'workspace/media/'
+  workspace: 'workspace'
+project:
+  author: 'Nicholas McCarthy'
+  description: 'Testing pdf2anki'
+  name: pdf2anki
+  version: '1.1'
+rag:
+  embedding_model: text-embedding-3-large
+  enabled: false
+  index_path: null
+  k: 5
+  provider: faiss
+review:
+  allow_edits: true
+  enabled: false
+  min_score: 7.0
+  template_version: '1.0'
+strategies:
+  cloze_definitions:
+    enabled: true 
+    min_score: null
+    params: {}
+    template_version: '1.0'
+  figure_based:
+    enabled: false 
+    min_score: null
+    params: {}
+    template_version: '1.0'
+  key_research_points:
+    enabled: true
+    min_score: null
+    params: {}
+    template_version: '1.0'
+tags:
+  auto_generate: true
+  default_tags: [pdf2anki]
+  include_source: true
+  include_strategy: true 
+taxonomy:
+  auto_detect: true
+  hierarchical: true
+  max_depth: 3
+telemetry:
+  enabled: true
+  track_cache_hits: true
+  track_costs: true
+  track_timing: true
+  track_tokens: true

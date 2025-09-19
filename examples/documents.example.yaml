@@ -1,0 +1,31 @@
+documents:
+  samples/research_paper.pdf:
+    title: "Ancient Roman Philosophy (Abstract)"
+    enabled: true
+    tags: ["rome", "philosophy"]
+    pipelines:
+      - name: smart_cloze
+        prompt: cloze_generation
+        note_type: CustomCloze
+        chunking:
+          mode: smart
+          max_tokens: 1500
+      - name: whole_high_concept
+        prompt: high_concept_cloze_generation
+        note_type: CustomCloze
+        chunking:
+          mode: entire
+          max_tokens: 8000
+
+  samples/textbook.pdf:
+    title: "Brief History of Ancient Rome"
+    enabled: true
+    tags: ["rome", "history"]
+    pipelines:
+      - name: chapter_key_points
+        prompt: key_points
+        note_type: Basic
+        chunking:
+          mode: sections
+          max_tokens: 2000
+

@@ -1,0 +1,40 @@
+You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start }}-{{ page_end }}):
+
+{% if section %}
+**Section**: {{ section }}
+{% endif %}
+
+**Text Content**:
+{{ chunk }}
+
+---
+
+**Task**: Generate {{ max_cards | default(5) }} cloze deletion flashcards focusing on key terms, definitions, formulas, and important concepts from this text.
+
+**Requirements**:
+1. Identify important terms, concepts, numbers, and relationships
+2. Create meaningful cloze deletions using {{ '{{' }}c1::text{{ '}}' }} format
+3. Provide sufficient context to make the cloze meaningful
+4. Avoid creating too many cloze deletions in one card (max 3 per card)
+5. Include page citations for reference
+6. Focus on testable, important knowledge
+
+**Cloze Guidelines**:
+- Good: "The {{ '{{' }}c1::mitochondria{{ '}}' }} is known as the {{ '{{' }}c2::powerhouse of the cell{{ '}}' }} because it produces {{ '{{' }}c3::ATP{{ '}}' }}."
+- Avoid: "{{ '{{' }}c1::The{{ '}}' }} {{ '{{' }}c2::mitochondria{{ '}}' }} {{ '{{' }}c3::is{{ '}}' }} {{ '{{' }}c4::known{{ '}}' }} {{ '{{' }}c5::as{{ '}}' }}..." (too many deletions)
+
+**Output Format**: Respond with valid JSON containing an array of cloze flashcard objects:
+
+```json
+{
+  "cards": [
+    {
+      "cloze_text": "Text with {{ '{{' }}c1::cloze{{ '}}' }} deletions",
+      "extra": "Additional context or explanation",
+      "page_citation": "p. {{ page_start }}",
+      "core_concept": "Main concept being tested",
+      "difficulty": "easy|medium|hard",
+      "tags": ["definition", "term"]
+    }
+  ]
+}

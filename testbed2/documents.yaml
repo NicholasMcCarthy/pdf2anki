@@ -1,0 +1,26 @@
+documents:
+  Giovanna Medina2020 - Deep learning method for segmentation of rotator cuff muscles on MR images.pdf:
+    enabled: true
+    file_hash: null
+    file_path: pdfs\Giovanna Medina2020 - Deep learning method for segmentation of
+      rotator cuff muscles on MR images.pdf
+    heuristic_chunking: null
+    heuristic_strategies: null
+    last_scanned: D:\Projects\pdf2anki\testbed2
+    metadata:
+      abstract_present: true
+      chapters_detected: false
+      created_date: null
+      doc_type: 'research_paper'
+      file_size: 8304143
+      has_doi: false
+      modified_date: null
+      page_count: 10
+      references_present: true
+      toc_present: true
+      two_column_layout: false
+    override_chunking: null
+    override_ingestion: null
+    override_strategies: null
+global_overrides: null
+version: '1.0'
