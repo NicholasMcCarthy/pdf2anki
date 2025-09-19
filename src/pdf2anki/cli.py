@@ -16,7 +16,7 @@ from .build import build_anki_deck
 from .config import Config, DocumentsConfig
 from .heuristics import DocumentAnalyzer
 from .io import clear_cache, load_csv, preview_cards
-from .preprocess import preprocess_pdf
+
 from .validate import validate_csv
 
 app = typer.Typer(
@@ -38,8 +38,11 @@ def init(
     workspace_dir = target_dir / "workspace"
     prompts_dir = target_dir / "prompts"
     examples_dir = target_dir / "examples"
+    notes_dir = target_dir / "notes"
+    samples_dir = target_dir / "samples"
+    scripts_dir = target_dir / "scripts"
     
-    for directory in [workspace_dir, prompts_dir, examples_dir]:
+    for directory in [workspace_dir, prompts_dir, examples_dir, notes_dir, samples_dir, scripts_dir]:
         directory.mkdir(parents=True, exist_ok=True)
         console.print(f"📁 Created directory: {directory}")
     
@@ -64,50 +67,42 @@ def init(
                 shutil.copy2(prompt_file, target_file)
                 console.print(f"📄 Copied prompt template: {target_file}")
     
+    # Copy note type definitions
+    package_notes_dir = Path(__file__).parent.parent.parent / "notes"
+    if package_notes_dir.exists():
+        for note_file in package_notes_dir.glob("*.yaml"):
+            target_file = notes_dir / note_file.name
+            if target_file.exists() and not force:
+                console.print(f"⚠️  {target_file} already exists. Use --force to overwrite.")
+            else:
+                shutil.copy2(note_file, target_file)
+                console.print(f"📝 Copied note type: {target_file}")
+    
+    # Copy sample generation script
+    package_scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+    if package_scripts_dir.exists():
+        for script_file in package_scripts_dir.glob("*.py"):
+            target_file = scripts_dir / script_file.name
+            if target_file.exists() and not force:
+                console.print(f"⚠️  {target_file} already exists. Use --force to overwrite.")
+            else:
+                shutil.copy2(script_file, target_file)
+                console.print(f"🔧 Copied script: {target_file}")
+    
     console.print(Panel.fit(
         "✅ Initialization complete!\n\n"
         "Next steps:\n"
         "1. Edit examples/config.example.yaml to configure your project\n"
         "2. Place PDF files in the configured input paths\n"
-        "3. Run: pdf2anki preprocess --config examples/config.example.yaml",
+        "3. Run: pdf2anki scan-docs --config examples/config.example.yaml\n"
+        "4. Run: pdf2anki generate --config examples/config.example.yaml\n\n"
+        "Optional:\n"
+        "- Generate sample PDFs: python scripts/generate_samples.py\n"
+        "- Customize note types in notes/\n"
+        "- Modify prompt templates in prompts/",
         title="Success",
         style="green"
     ))
-
-
-@app.command()
-def preprocess(
-    config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
-    pdf_path: Optional[Path] = typer.Option(None, "--pdf", help="Specific PDF file to process"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
-) -> None:
-    """Preprocess PDF files into CSV format with flashcard data."""
-    console.print("🔄 Starting PDF preprocessing...", style="bold blue")
-    
-    try:
-        # Load configuration
-        config = Config.from_yaml(config_path)
-        
-        # Override input paths if specific PDF provided
-        if pdf_path:
-            config.inputs.paths = [pdf_path]
-        
-        # Run preprocessing
-        result = preprocess_pdf(config, verbose=verbose)
-        
-        console.print(Panel.fit(
-            f"✅ Preprocessing complete!\n\n"
-            f"Generated {result['total_cards']} cards from {result['processed_pdfs']} PDFs\n"
-            f"Output: {result['csv_path']}\n"
-            f"Media: {result['media_path']}\n"
-            f"Manifest: {result['manifest_path']}",
-            title="Success",
-            style="green"
-        ))
-        
-    except Exception as e:
-        console.print(f"❌ Error during preprocessing: {e}", style="bold red")
-        raise typer.Exit(1)
 
 
 @app.command()
@@ -148,7 +143,7 @@ def build(
     output_path: Optional[Path] = typer.Option(None, "--output", "-o", help="Output .apkg path (overrides config)"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
 ) -> None:
-    """Build Anki deck from preprocessed CSV data."""
+    """Build Anki deck from CSV data."""
     console.print("🔨 Building Anki deck...", style="bold blue")
     
     try:
@@ -426,26 +421,141 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
         console.print(f"  Tokens per chunk: {effective_config.ingestion.chunking.tokens_per_chunk}")
         console.print(f"  Enabled strategies: {list(effective_config.strategies.__dict__.keys())[:3]}...")  # TODO: Show actual enabled strategies
         
-        # Show sample prompt (TODO: implement actual prompt preview)
-        console.print("🎯 Sample Prompt Preview:", style="yellow")
-        console.print("  [First chunk content would be rendered here with truncated input]")
-        console.print("  [Showing first/last segments of actual chunk text]")
+        # Show sample prompt (first chunk preview)
+        console.print("🎯 First Chunk Prompt Preview:", style="yellow")
+        
+        try:
+            # Load and chunk the first few pages to get first chunk
+            from .pdf import PDFProcessor
+            from .chunking import TextChunker
+            from .prompts import create_prompt_manager
+            
+            pdf_processor = PDFProcessor()
+            text_chunker = TextChunker(effective_config.ingestion.chunking)
+            prompt_manager = create_prompt_manager()
+            
+            # Extract text from first few pages
+            pdf_text = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
+            
+            # Get first chunk
+            chunks = text_chunker.chunk_text(pdf_text, start_page=1)
+            if chunks:
+                first_chunk = chunks[0]
+                
+                # Try to get first enabled strategy and render preview
+                enabled_strategies = [name for name, config in effective_config.strategies.__dict__.items() 
+                                    if hasattr(config, 'enabled') and config.enabled]
+                
+                if enabled_strategies:
+                    strategy_name = enabled_strategies[0]
+                    
+                    # Get strategy template (simplified)
+                    template_content = f"Strategy: {strategy_name}\nChunk text preview:\n"
+                    
+                    # Show truncated chunk content
+                    chunk_preview = first_chunk.text[:200] + "..." if len(first_chunk.text) > 200 else first_chunk.text
+                    template_content += f"\n{chunk_preview}\n\n[Prompt would continue with strategy-specific instructions...]"
+                    
+                    console.print(f"  📄 Pages {first_chunk.start_page}-{first_chunk.end_page} | {first_chunk.token_count} tokens")
+                    console.print(f"  🔧 Strategy: {strategy_name}")
+                    console.print("  📝 Template preview:")
+                    console.print(f"     {chunk_preview}")
+                else:
+                    console.print("  ⚠️  No enabled strategies found")
+            else:
+                console.print("  ⚠️  No chunks generated (PDF may be empty or unreadable)")
+                
+        except Exception as e:
+            console.print(f"  ⚠️  Could not generate prompt preview: {e}")
+            console.print("  📝 [First chunk preview would be rendered here]")
+            console.print("  🔧 [Strategy-specific prompt template would be shown]")
 
 
 def _generate_samples(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
     """Generate sample cards from first chunk of each document."""
     console.print("🔬 Generating samples from first chunk of each document...", style="bold green")
     
-    # TODO: Implement sample generation
-    # This should:
-    # 1. Process only the first chunk of each document
-    # 2. Call LLM for generation but don't cache/persist
-    # 3. Display parsed card results
-    
     for doc_key, doc_config in documents.items():
         console.print(f"\n📄 {doc_key}", style="bold cyan")
-        console.print("  [Sample generation not yet implemented]")
-        console.print("  [Would show generated cards from first chunk here]")
+        
+        if not doc_config.metadata:
+            console.print("  ⚠️  No metadata available - skip")
+            continue
+            
+        try:
+            # Get effective configuration
+            effective_config = documents_config.get_effective_config(doc_key, base_config)
+            
+            # Load and chunk the document to get first chunk
+            from .pdf import PDFProcessor
+            from .chunking import TextChunker
+            from .llm import create_llm_provider
+            
+            pdf_processor = PDFProcessor()
+            text_chunker = TextChunker(effective_config.ingestion.chunking)
+            
+            # Extract text from first few pages
+            pdf_text = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
+            
+            # Get first chunk
+            chunks = text_chunker.chunk_text(pdf_text, start_page=1)
+            if not chunks:
+                console.print("  ⚠️  No chunks generated (PDF may be empty or unreadable)")
+                continue
+                
+            first_chunk = chunks[0]
+            console.print(f"  📄 Processing chunk: pages {first_chunk.start_page}-{first_chunk.end_page}, {first_chunk.token_count} tokens")
+            
+            # Get enabled strategies
+            enabled_strategies = [name for name, config in effective_config.strategies.__dict__.items() 
+                                if hasattr(config, 'enabled') and config.enabled]
+            
+            if not enabled_strategies:
+                console.print("  ⚠️  No enabled strategies found")
+                continue
+                
+            # Mock LLM call for sample generation (no real LLM call yet)
+            console.print(f"  🤖 Mock LLM generation with strategy: {enabled_strategies[0]}")
+            
+            # Mock generated cards
+            sample_cards = [
+                {
+                    "id": f"sample_{doc_key}_001",
+                    "note_type": "basic",
+                    "front": f"Sample question from {Path(doc_config.file_path).stem}",
+                    "back": f"Sample answer based on first chunk content",
+                    "source_pdf": Path(doc_config.file_path).name,
+                    "page_start": first_chunk.start_page,
+                    "page_end": first_chunk.end_page,
+                    "strategy": enabled_strategies[0]
+                },
+                {
+                    "id": f"sample_{doc_key}_002", 
+                    "note_type": "cloze",
+                    "cloze_text": f"The main concept from this document is {{{{c1::sample concept}}}}",
+                    "extra": "Additional context",
+                    "source_pdf": Path(doc_config.file_path).name,
+                    "page_start": first_chunk.start_page,
+                    "page_end": first_chunk.end_page,
+                    "strategy": enabled_strategies[0]
+                }
+            ]
+            
+            # Display generated cards
+            console.print(f"  ✅ Generated {len(sample_cards)} sample cards:")
+            
+            for i, card in enumerate(sample_cards, 1):
+                console.print(f"    {i}. [{card['note_type'].upper()}] {card.get('front', card.get('cloze_text', 'N/A'))}")
+                if 'back' in card:
+                    console.print(f"       → {card['back']}")
+                if 'extra' in card:
+                    console.print(f"       + {card['extra']}")
+                    
+            console.print("  📊 Sample cards generated (display-only, not saved)")
+            
+        except Exception as e:
+            console.print(f"  ❌ Error generating samples: {e}")
+            console.print("  🔧 [Mock sample generation would be shown here]")
 
 
 def _generate_sample_csv_schema(base_config: Config) -> None:

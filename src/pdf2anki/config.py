@@ -205,6 +205,28 @@ class TelemetryConfig(BaseModel):
     track_cache_hits: bool = True
 
 
+class PipelineConfig(BaseModel):
+    """Pipeline execution configuration."""
+    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    rag: RAGConfig = Field(default_factory=RAGConfig)
+    deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
+    hallucination: HallucinationConfig = Field(default_factory=HallucinationConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+
+
+class GenerateConfig(BaseModel):
+    """Generation-specific configuration."""
+    strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
+    tags: TagsConfig = Field(default_factory=TagsConfig)
+    taxonomy: TaxonomyConfig = Field(default_factory=TaxonomyConfig)
+    ids: IdsConfig = Field(default_factory=IdsConfig)
+    language: str = "en"
+    anki: AnkiConfig = Field(default_factory=AnkiConfig)
+    output: OutputConfig = Field(default_factory=OutputConfig)
+
+
 class DocumentMetadata(BaseModel):
     """Metadata extracted from PDF document."""
     page_count: int
@@ -298,20 +320,8 @@ class Config(BaseSettings):
     
     project: ProjectConfig = Field(default_factory=ProjectConfig)
     inputs: InputConfig = Field(default_factory=InputConfig)
-    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
-    rag: RAGConfig = Field(default_factory=RAGConfig)
-    deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
-    hallucination: HallucinationConfig = Field(default_factory=HallucinationConfig)
-    review: ReviewConfig = Field(default_factory=ReviewConfig)
-    tags: TagsConfig = Field(default_factory=TagsConfig)
-    taxonomy: TaxonomyConfig = Field(default_factory=TaxonomyConfig)
-    ids: IdsConfig = Field(default_factory=IdsConfig)
-    language: str = "en"
-    anki: AnkiConfig = Field(default_factory=AnkiConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
-    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
+    generate: GenerateConfig = Field(default_factory=GenerateConfig)
 
     class Config:
         env_file = ".env"
@@ -320,17 +330,148 @@ class Config(BaseSettings):
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "Config":
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file with legacy support."""
+        import warnings
+        
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
+        
+        # Check if this is a legacy config (has top-level keys like llm, strategies, etc.)
+        legacy_keys = {
+            'ingestion', 'llm', 'strategies', 'rag', 'deduplication', 
+            'hallucination', 'review', 'tags', 'taxonomy', 'ids', 'anki', 
+            'output', 'telemetry', 'language'
+        }
+        
+        found_legacy_keys = set(data.keys()) & legacy_keys
+        
+        if found_legacy_keys:
+            warnings.warn(
+                "Legacy configuration format detected. Please migrate to the new "
+                "generate + pipeline schema. Legacy support will be removed in the next minor version.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            
+            # Auto-translate legacy config
+            translated_data = {
+                'project': data.get('project', {}),
+                'inputs': data.get('inputs', {}),
+                'pipeline': {
+                    'ingestion': data.get('ingestion', {}),
+                    'llm': data.get('llm', {}),
+                    'rag': data.get('rag', {}),
+                    'deduplication': data.get('deduplication', {}),
+                    'hallucination': data.get('hallucination', {}),
+                    'review': data.get('review', {}),
+                    'telemetry': data.get('telemetry', {}),
+                },
+                'generate': {
+                    'strategies': data.get('strategies', {}),
+                    'tags': data.get('tags', {}),
+                    'taxonomy': data.get('taxonomy', {}),
+                    'ids': data.get('ids', {}),
+                    'language': data.get('language', 'en'),
+                    'anki': data.get('anki', {}),
+                    'output': data.get('output', {}),
+                }
+            }
+            data = translated_data
+        
         return cls(**data)
 
     def to_yaml(self, path: Union[str, Path]) -> None:
-        """Save configuration to YAML file."""
+        """Save configuration to YAML file with proper scalar serialization."""
+        def represent_enum(dumper, data):
+            return dumper.represent_scalar('tag:yaml.org,2002:str', data.value)
+        
+        def represent_path(dumper, data):
+            return dumper.represent_scalar('tag:yaml.org,2002:str', str(data))
+        
+        # Register custom representers for enums and paths
+        yaml.add_representer(ProviderType, represent_enum)
+        yaml.add_representer(ChunkingMode, represent_enum)
+        yaml.add_representer(DeckStructure, represent_enum)
+        yaml.add_representer(IdStrategy, represent_enum)
+        yaml.add_representer(DeduplicationPolicy, represent_enum)
+        yaml.add_representer(DocumentType, represent_enum)
+        yaml.add_representer(Path, represent_path)
+        
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
 
     def create_workspace(self) -> None:
         """Create workspace directories."""
-        self.output.workspace.mkdir(parents=True, exist_ok=True)
-        self.output.media_path.mkdir(parents=True, exist_ok=True)
+        self.generate.output.workspace.mkdir(parents=True, exist_ok=True)
+        self.generate.output.media_path.mkdir(parents=True, exist_ok=True)
+    
+    # Legacy property access for backward compatibility
+    @property
+    def ingestion(self):
+        """Legacy access to pipeline.ingestion."""
+        return self.pipeline.ingestion
+    
+    @property 
+    def llm(self):
+        """Legacy access to pipeline.llm."""
+        return self.pipeline.llm
+    
+    @property
+    def strategies(self):
+        """Legacy access to generate.strategies."""
+        return self.generate.strategies
+    
+    @property
+    def rag(self):
+        """Legacy access to pipeline.rag."""
+        return self.pipeline.rag
+    
+    @property
+    def deduplication(self):
+        """Legacy access to pipeline.deduplication."""
+        return self.pipeline.deduplication
+    
+    @property
+    def hallucination(self):
+        """Legacy access to pipeline.hallucination."""
+        return self.pipeline.hallucination
+    
+    @property
+    def review(self):
+        """Legacy access to pipeline.review.""" 
+        return self.pipeline.review
+    
+    @property
+    def tags(self):
+        """Legacy access to generate.tags."""
+        return self.generate.tags
+    
+    @property
+    def taxonomy(self):
+        """Legacy access to generate.taxonomy."""
+        return self.generate.taxonomy
+    
+    @property
+    def ids(self):
+        """Legacy access to generate.ids."""
+        return self.generate.ids
+    
+    @property
+    def language(self):
+        """Legacy access to generate.language."""
+        return self.generate.language
+    
+    @property
+    def anki(self):
+        """Legacy access to generate.anki."""
+        return self.generate.anki
+    
+    @property
+    def output(self):
+        """Legacy access to generate.output."""
+        return self.generate.output
+    
+    @property 
+    def telemetry(self):
+        """Legacy access to pipeline.telemetry."""
+        return self.pipeline.telemetry
