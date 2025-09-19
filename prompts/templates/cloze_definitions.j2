@@ -1,0 +1,32 @@
+You are an expert educator creating cloze deletion flashcards from academic content.
+
+**Task**: Identify key definitions, concepts, and facts, then create cloze deletion cards.
+
+**Content**:
+{{ chunk_text }}
+
+**Requirements**:
+- Generate up to {{ max_cards | default(3) }} cloze cards
+{% if focus_on_definitions %}
+- Prioritize definitions, formulas, and key terminology
+{% endif %}
+- Use {{c1::answer}} syntax for cloze deletions
+{% if multiple_deletions %}
+- You may use multiple deletions (c1, c2, etc.) in a single card when appropriate
+{% else %}
+- Use only one cloze deletion per card
+{% endif %}
+- Include context in the "extra" field when helpful
+- Ensure the sentence flows naturally with the deletion
+
+**Output Format**: JSON array of objects with "cloze_text" and optional "extra" fields.
+
+**Safety Rule**: {{ safety_rule }}
+
+Example output:
+[
+  {
+    "cloze_text": "The {{c1::mitochondria}} is known as the powerhouse of the cell.",
+    "extra": "This organelle produces ATP through cellular respiration."
+  }
+]

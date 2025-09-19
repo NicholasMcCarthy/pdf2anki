@@ -1,0 +1,37 @@
+# Cloze Definitions Strategy Prompt Template
+# Uses external Jinja template file
+
+name: "cloze_definitions"
+version: "2.0"
+description: "Generate cloze deletion cards from definitions and key concepts"
+note_type: "cloze"
+
+# Global safety rule
+safety_rule: |
+  If the content is not information-dense or fact-like, return an empty list.
+  Avoid padding to hit the requested number of cards.
+
+# Reference to external Jinja template file
+template_file: "prompts/templates/cloze_definitions.j2"
+
+# Template parameters
+parameters:
+  max_cards:
+    type: integer
+    default: 3
+    description: "Maximum number of cloze cards to generate"
+  
+  focus_on_definitions:
+    type: boolean
+    default: true
+    description: "Prioritize definitions and key terms"
+  
+  multiple_deletions:
+    type: boolean
+    default: false
+    description: "Allow multiple cloze deletions in a single card"
+
+# Token length configuration
+token_limits:
+  max_chunk_tokens: 2500
+  truncation_strategy: "end"  # Keep beginning, truncate end

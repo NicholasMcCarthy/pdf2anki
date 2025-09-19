@@ -2,15 +2,19 @@
 
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
+import glob
+from datetime import datetime
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .build import build_anki_deck
-from .config import Config
+from .config import Config, DocumentsConfig
+from .heuristics import DocumentAnalyzer
 from .io import clear_cache, load_csv, preview_cards
 from .preprocess import preprocess_pdf
 from .validate import validate_csv
@@ -196,6 +200,363 @@ def preview(
     except Exception as e:
         console.print(f"❌ Error during preview: {e}", style="bold red")
         raise typer.Exit(1)
+
+
+@app.command()
+def version() -> None:
+    """Show version information."""
+    from . import __version__
+    console.print(f"pdf2anki version {__version__}")
+
+
+@app.command(name="scan-docs")
+def scan_docs(
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to configuration file"),
+    documents_file: Path = typer.Option(Path("documents.yaml"), "--documents", help="Path to documents.yaml file"),
+    update: bool = typer.Option(True, "--update/--no-update", help="Update existing documents.yaml"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+) -> None:
+    """Discover PDFs and extract metadata, creating or updating documents.yaml."""
+    console.print("🔍 Scanning documents and extracting metadata...", style="bold blue")
+    
+    try:
+        # Load base configuration for input paths
+        if config_path and config_path.exists():
+            base_config = Config.from_yaml(config_path)
+        else:
+            base_config = Config()
+            if not base_config.inputs.paths:
+                console.print("⚠️  No input paths configured. Please set paths in config or add PDFs to current directory.", style="yellow")
+                base_config.inputs.paths = ["."]
+        
+        # Load or create documents configuration
+        documents_config = DocumentsConfig.from_yaml(documents_file)
+        
+        # Discover PDF files
+        discovered_pdfs = []
+        for path_pattern in base_config.inputs.paths:
+            path = Path(path_pattern)
+            
+            if path.is_file() and path.suffix.lower() == '.pdf':
+                discovered_pdfs.append(str(path))
+            elif path.is_dir():
+                for pattern in base_config.inputs.patterns:
+                    if base_config.inputs.recursive:
+                        discovered_pdfs.extend(glob.glob(str(path / "**" / pattern), recursive=True))
+                    else:
+                        discovered_pdfs.extend(glob.glob(str(path / pattern)))
+        
+        if not discovered_pdfs:
+            console.print("❌ No PDF files found in configured paths.", style="red")
+            raise typer.Exit(1)
+        
+        console.print(f"📄 Found {len(discovered_pdfs)} PDF files")
+        
+        # Initialize analyzer
+        analyzer = DocumentAnalyzer()
+        
+        # Analyze documents
+        results_table = Table(title="Document Analysis Results")
+        results_table.add_column("File", style="cyan")
+        results_table.add_column("Pages", justify="right")
+        results_table.add_column("Type", style="green")
+        results_table.add_column("TOC", justify="center")
+        results_table.add_column("Chapters", justify="center")
+        results_table.add_column("2-col", justify="center")
+        results_table.add_column("DOI", justify="center")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task("Analyzing documents...", total=len(discovered_pdfs))
+            
+            for pdf_path in discovered_pdfs:
+                progress.update(task, description=f"Analyzing {Path(pdf_path).name}")
+                
+                # Analyze document
+                metadata = analyzer.analyze_document(pdf_path)
+                
+                # Add to documents config
+                documents_config.add_or_update_document(pdf_path, metadata)
+                
+                # Add to results table
+                results_table.add_row(
+                    Path(pdf_path).name,
+                    str(metadata.page_count),
+                    metadata.doc_type.value,
+                    "✓" if metadata.toc_present else "✗",
+                    "✓" if metadata.chapters_detected else "✗",
+                    "✓" if metadata.two_column_layout else "✗",
+                    "✓" if metadata.has_doi else "✗",
+                )
+                
+                progress.advance(task)
+        
+        # Save documents configuration
+        documents_config.to_yaml(documents_file)
+        
+        # Display results
+        console.print("\n")
+        console.print(results_table)
+        
+        # Summary
+        doc_types = {}
+        for doc_config in documents_config.documents.values():
+            if doc_config.metadata:
+                doc_type = doc_config.metadata.doc_type.value
+                doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
+        
+        summary_lines = [
+            f"✅ Analysis complete!",
+            f"",
+            f"Documents analyzed: {len(discovered_pdfs)}",
+            f"Configuration saved: {documents_file}",
+            f"",
+            "Document types:",
+        ]
+        
+        for doc_type, count in doc_types.items():
+            summary_lines.append(f"  • {doc_type}: {count}")
+        
+        console.print(Panel.fit(
+            "\n".join(summary_lines),
+            title="Scan Results",
+            style="green"
+        ))
+        
+    except Exception as e:
+        console.print(f"❌ Error during document scanning: {e}", style="bold red")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(1)
+
+
+@app.command()
+def generate(
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to configuration file"),
+    documents_file: Path = typer.Option(Path("documents.yaml"), "--documents", help="Path to documents.yaml file"),
+    plan: bool = typer.Option(False, "--plan", help="Show generation plan without LLM calls"),
+    sample: bool = typer.Option(False, "--sample", help="Generate sample cards from first chunk only"),
+    plan_sample_csv: bool = typer.Option(False, "--plan-sample-csv", help="Generate sample CSV schema"),
+    pdf_override: Optional[Path] = typer.Option(None, "--pdf", help="Process specific PDF only"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+) -> None:
+    """Generate flashcards using documents.yaml configuration."""
+    console.print("🚀 Starting flashcard generation...", style="bold blue")
+    
+    try:
+        # Load base configuration
+        if config_path and config_path.exists():
+            base_config = Config.from_yaml(config_path)
+        else:
+            base_config = Config()
+        
+        # Check if documents.yaml exists
+        if not documents_file.exists():
+            console.print(f"📄 {documents_file} not found. Running scan-docs first...", style="yellow")
+            # TODO: Call scan_docs automatically
+            console.print("❌ Please run 'pdf2anki scan-docs' first to create documents.yaml", style="red")
+            raise typer.Exit(1)
+        
+        # Load documents configuration
+        documents_config = DocumentsConfig.from_yaml(documents_file)
+        
+        if not documents_config.documents:
+            console.print("❌ No documents found in documents.yaml", style="red")
+            raise typer.Exit(1)
+        
+        # Filter documents if PDF override specified
+        if pdf_override:
+            key = pdf_override.name
+            if key not in documents_config.documents:
+                console.print(f"❌ PDF {key} not found in documents.yaml", style="red")
+                raise typer.Exit(1)
+            process_documents = {key: documents_config.documents[key]}
+        else:
+            process_documents = {k: v for k, v in documents_config.documents.items() if v.enabled}
+        
+        if plan:
+            _show_generation_plan(process_documents, base_config, documents_config)
+        elif sample:
+            _generate_samples(process_documents, base_config, documents_config)
+        elif plan_sample_csv:
+            _generate_sample_csv_schema(base_config)
+        else:
+            _run_full_generation(process_documents, base_config, documents_config, verbose)
+        
+    except Exception as e:
+        console.print(f"❌ Error during generation: {e}", style="bold red")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(1)
+
+
+def _show_generation_plan(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
+    """Show generation plan for documents."""
+    console.print("📋 Generation Plan", style="bold green")
+    
+    for doc_key, doc_config in documents.items():
+        if not doc_config.metadata:
+            continue
+            
+        # Get effective configuration
+        effective_config = documents_config.get_effective_config(doc_key, base_config)
+        
+        console.print(f"\n📄 {doc_key}", style="bold cyan")
+        
+        # Show metadata and heuristics
+        metadata_table = Table(show_header=False, box=None)
+        metadata_table.add_column("Field", style="yellow")
+        metadata_table.add_column("Value")
+        
+        metadata_table.add_row("File Path", doc_config.file_path)
+        metadata_table.add_row("Pages", str(doc_config.metadata.page_count))
+        metadata_table.add_row("Document Type", doc_config.metadata.doc_type.value)
+        metadata_table.add_row("Has TOC", "✓" if doc_config.metadata.toc_present else "✗")
+        metadata_table.add_row("Has DOI", "✓" if doc_config.metadata.has_doi else "✗")
+        
+        console.print(metadata_table)
+        
+        # Show effective configuration
+        console.print("⚙️  Effective Configuration:", style="yellow")
+        console.print(f"  Chunking: {effective_config.ingestion.chunking.mode.value}")
+        console.print(f"  Tokens per chunk: {effective_config.ingestion.chunking.tokens_per_chunk}")
+        console.print(f"  Enabled strategies: {list(effective_config.strategies.__dict__.keys())[:3]}...")  # TODO: Show actual enabled strategies
+        
+        # Show sample prompt (TODO: implement actual prompt preview)
+        console.print("🎯 Sample Prompt Preview:", style="yellow")
+        console.print("  [First chunk content would be rendered here with truncated input]")
+        console.print("  [Showing first/last segments of actual chunk text]")
+
+
+def _generate_samples(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
+    """Generate sample cards from first chunk of each document."""
+    console.print("🔬 Generating samples from first chunk of each document...", style="bold green")
+    
+    # TODO: Implement sample generation
+    # This should:
+    # 1. Process only the first chunk of each document
+    # 2. Call LLM for generation but don't cache/persist
+    # 3. Display parsed card results
+    
+    for doc_key, doc_config in documents.items():
+        console.print(f"\n📄 {doc_key}", style="bold cyan")
+        console.print("  [Sample generation not yet implemented]")
+        console.print("  [Would show generated cards from first chunk here]")
+
+
+def _generate_sample_csv_schema(base_config: Config) -> None:
+    """Generate sample CSV schema from note type templates."""
+    console.print("📊 Generating sample CSV schema...", style="bold green")
+    
+    from .templates import get_note_type_manager
+    import csv
+    from io import StringIO
+    
+    note_manager = get_note_type_manager()
+    all_note_types = note_manager.list_note_types()
+    
+    if not all_note_types:
+        console.print("❌ No note types found. Please check notes/ directory.", style="red")
+        return
+    
+    # Collect all unique fields across note types
+    all_fields = set()
+    note_type_fields = {}
+    
+    for note_type in all_note_types:
+        fields = note_manager.get_csv_fields(note_type)
+        note_type_fields[note_type] = fields
+        all_fields.update(fields)
+    
+    # Convert to sorted list for consistent output
+    all_fields = sorted(all_fields)
+    
+    # Display summary
+    console.print(f"Found {len(all_note_types)} note types:")
+    for note_type in all_note_types:
+        console.print(f"  • {note_type}: {len(note_type_fields[note_type])} fields")
+    
+    console.print(f"\nUnion of all fields: {len(all_fields)} columns")
+    
+    # Generate sample CSV content
+    output = StringIO()
+    writer = csv.writer(output)
+    
+    # Write header
+    writer.writerow(all_fields)
+    
+    # Write one sample row per note type
+    for note_type in all_note_types:
+        row = []
+        for field in all_fields:
+            if field in note_type_fields[note_type]:
+                # Generate sample data based on field name
+                if field == "id":
+                    row.append(f"card_{note_type}_001")
+                elif field == "note_type":
+                    row.append(note_type)
+                elif field == "front":
+                    row.append(f"Sample question for {note_type}")
+                elif field == "back":
+                    row.append(f"Sample answer for {note_type}")
+                elif field == "cloze_text":
+                    row.append(f"Sample {{{{c1::cloze deletion}}}} for {note_type}")
+                elif field == "extra":
+                    row.append(f"Extra context for {note_type}")
+                elif field == "deck":
+                    row.append("PDF2Anki Generated")
+                elif field == "tags":
+                    row.append(f"pdf2anki;{note_type}")
+                elif field == "source_pdf":
+                    row.append("sample.pdf")
+                elif field in ["page_start", "page_end"]:
+                    row.append("1")
+                elif field in ["created_at", "updated_at"]:
+                    row.append("2024-01-15T10:00:00Z")
+                else:
+                    row.append(f"sample_{field}")
+            else:
+                row.append("")  # Empty for fields not in this note type
+        writer.writerow(row)
+    
+    # Save to file
+    output_file = Path("sample_schema.csv")
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(output.getvalue())
+    
+    console.print(f"\n✅ Sample CSV schema saved to: {output_file}")
+    console.print(f"Preview (first 5 columns):")
+    
+    # Show preview
+    lines = output.getvalue().strip().split('\n')
+    preview_table = Table()
+    headers = lines[0].split(',')[:5]
+    for header in headers:
+        preview_table.add_column(header.strip('"'), style="cyan")
+    
+    for line in lines[1:]:
+        cols = line.split(',')[:5]
+        preview_table.add_row(*[col.strip('"') for col in cols])
+    
+    console.print(preview_table)
+
+
+def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool) -> None:
+    """Run full generation process."""
+    console.print("⚡ Running full generation...", style="bold green")
+    
+    # TODO: Implement full generation orchestration
+    # This should:
+    # 1. Use documents.yaml layering for each PDF
+    # 2. Process by chunk and apply strategies in order
+    # 3. Persist CSV/media/manifest to workspace/
+    
+    console.print("  [Full generation not yet implemented]")
+    console.print("  [Would orchestrate generation using documents.yaml configuration]")
 
 
 @app.command()

@@ -1,0 +1,75 @@
+# Example documents.yaml file
+# This file is created and maintained by the scan-docs command
+
+version: "1.0"
+
+# Document-specific configurations
+documents:
+  sample_paper.pdf:
+    file_path: "pdfs/sample_paper.pdf"
+    file_hash: "abc123def456"
+    
+    # Metadata extracted by scan-docs
+    metadata:
+      page_count: 12
+      toc_present: false
+      chapters_detected: false
+      abstract_present: true
+      references_present: true
+      two_column_layout: true
+      has_doi: true
+      doc_type: "research_paper"
+      file_size: 2048576
+    
+    # Heuristic defaults (auto-generated)
+    heuristic_chunking:
+      mode: "sections"
+      tokens_per_chunk: 1500
+      overlap_tokens: 200
+    heuristic_strategies:
+      - "key_points"
+      - "cloze_definitions"
+    
+    # User overrides (optional)
+    override_chunking: null
+    override_strategies: null
+    override_ingestion: null
+    
+    # Processing control
+    enabled: true
+    last_scanned: "2024-01-15T10:30:00Z"
+
+  textbook_chapter.pdf:
+    file_path: "pdfs/textbook_chapter.pdf"
+    file_hash: "def789ghi012"
+    
+    metadata:
+      page_count: 45
+      toc_present: true
+      chapters_detected: true
+      abstract_present: false
+      references_present: true
+      two_column_layout: false
+      has_doi: false
+      doc_type: "textbook"
+      file_size: 8192000
+    
+    heuristic_chunking:
+      mode: "smart"
+      tokens_per_chunk: 2500
+      overlap_tokens: 300
+    heuristic_strategies:
+      - "key_points"
+      - "figure_based"
+    
+    enabled: true
+    last_scanned: "2024-01-15T10:35:00Z"
+
+# Global overrides (applied to all documents)
+global_overrides:
+  llm:
+    temperature: 0.0
+    model: "gpt-4-1106-preview"
+  strategies:
+    key_points:
+      max_cards: 4
