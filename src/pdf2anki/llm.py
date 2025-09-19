@@ -5,8 +5,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from langchain.callbacks import get_openai_callback
-from langchain.cache import SQLiteCache
+from langchain_community.callbacks.manager import get_openai_callback
+from langchain_community.cache import SQLiteCache
 from langchain.globals import set_llm_cache
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel

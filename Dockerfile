@@ -14,11 +14,12 @@ RUN apt-get update && apt-get install -y \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy requirements
-COPY pyproject.toml /tmp/
-WORKDIR /tmp
+# Copy project metadata and source so editable install can find 'src'
+WORKDIR /app
+COPY pyproject.toml README.md /app/
+COPY src/ /app/src/
 
-# Install Python dependencies
+# Install Python dependencies and the package (editable)
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -e .
 

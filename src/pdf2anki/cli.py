@@ -22,7 +22,6 @@ app = typer.Typer(
 )
 console = Console()
 
-
 @app.command()
 def init(
     target_dir: Path = typer.Argument(Path.cwd(), help="Target directory for initialization"),
@@ -197,27 +196,6 @@ def preview(
     except Exception as e:
         console.print(f"❌ Error during preview: {e}", style="bold red")
         raise typer.Exit(1)
-
-
-@app.command("cache")
-def cache_cmd() -> None:
-    """Cache management commands."""
-    pass
-
-
-@app.command("clear", parent=cache_cmd)
-def clear_cache_cmd(
-    confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
-) -> None:
-    """Clear LLM cache."""
-    if not confirm:
-        confirm = typer.confirm("Are you sure you want to clear the LLM cache?")
-    
-    if confirm:
-        cleared = clear_cache()
-        console.print(f"✅ Cleared {cleared} cache entries", style="green")
-    else:
-        console.print("❌ Cache clear cancelled", style="yellow")
 
 
 @app.command()
