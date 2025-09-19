@@ -1,0 +1,54 @@
+You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start }}-{{ page_end }}) that contains references to figures, tables, or visual content:
+
+{% if section %}
+**Section**: {{ section }}
+{% endif %}
+
+**Text Content**:
+{{ chunk }}
+
+---
+
+**Task**: Generate {{ max_cards | default(3) }} flashcards that focus on the visual content (figures, tables, charts, diagrams) referenced in this text.
+
+**Requirements**:
+1. Focus on interpreting and understanding visual information
+2. Create questions about data trends, relationships, and key insights
+3. Test understanding of visual concepts and their implications
+4. Include specific references to figures, tables, or visual elements
+5. Connect visual information to broader concepts when possible
+6. Avoid questions that can't be answered without seeing the visual
+
+**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+
+```json
+{
+  "cards": [
+    {
+      "front": "Question about the visual content or its interpretation",
+      "back": "Answer with explanation of the visual element and its significance",
+      "page_citation": "p. {{ page_start }}",
+      "core_concept": "Main concept illustrated by the visual",
+      "difficulty": "easy|medium|hard",
+      "tags": ["visual", "figure", "specific-type"]
+    }
+  ]
+}
+```
+
+**Good Question Types**:
+- "What trend does Figure X show regarding [topic]?"
+- "According to Table Y, what are the three highest values for [metric]?"
+- "How does the diagram illustrate the relationship between [A] and [B]?"
+- "What can be concluded from the data presented in [visual element]?"
+- "What does the chart reveal about [pattern or trend]?"
+
+**Focus Areas**:
+- Data interpretation and trends
+- Comparisons shown in visuals
+- Key insights from charts/graphs
+- Relationships illustrated in diagrams
+- Significant values or patterns in tables
+- Implications of visual findings
+
+Generate the figure-based flashcards now:
