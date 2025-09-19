@@ -21,12 +21,15 @@ inputs:
 ingestion:
   mode: "extract_text"
   chunking:
-    mode: "smart"  # Options: pages, sections, paragraphs, smart
+    mode: "smart"  # Options: pages, sections, paragraphs, smart, entire
     tokens_per_chunk: 2000
     overlap_tokens: 200
     respect_page_bounds: true
     min_chunk_tokens: 100
     max_chunk_tokens: 4000
+    # Entire mode specific settings (only used when mode: "entire")
+    enable_trimming: true  # Enable/disable terminal section trimming
+    token_budget: 8000  # Max tokens before auto-splitting in entire mode
   extract_images: true
   extract_tables: false
   ocr_fallback: false
