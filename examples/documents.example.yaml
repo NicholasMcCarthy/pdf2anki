@@ -1,0 +1,98 @@
+# PDF2Anki Documents Configuration Example
+# This file tracks documents and their processing configuration
+
+version: "1.0"
+
+# Document metadata and configuration
+documents:
+  # Example academic paper
+  machine_learning_intro.pdf:
+    file_path: "pdfs/machine_learning_intro.pdf"
+    enabled: true
+    last_scanned: "2024-01-15T10:00:00Z"
+    
+    # Document metadata (auto-extracted by scan-docs)
+    metadata:
+      page_count: 15
+      doc_type: "academic_paper"
+      title: "Introduction to Machine Learning"
+      authors: ["Dr. Jane Smith", "Prof. John Doe"]
+      toc_present: true
+      chapters_detected: true
+      two_column_layout: false
+      has_doi: true
+      has_figures: true
+      figure_count: 5
+      has_tables: true
+      table_count: 3
+    
+    # Document-specific overrides
+    overrides:
+      pipeline:
+        ingestion:
+          chunking:
+            mode: "sections"  # Use section-based chunking for academic papers
+            tokens_per_chunk: 1500
+      generate:
+        strategies:
+          key_points:
+            enabled: true
+            params:
+              max_cards: 8  # More cards for comprehensive papers
+          cloze_definitions:
+            enabled: true
+            params:
+              max_cards: 5
+          figure_based:
+            enabled: true  # Enable figure-based cards for visual content
+            params:
+              max_cards: 3
+        tags:
+          default_tags: ["pdf2anki", "machine-learning", "academic"]
+
+  # Example textbook chapter
+  algorithms_textbook.pdf:
+    file_path: "pdfs/algorithms_textbook.pdf"
+    enabled: true
+    last_scanned: "2024-01-15T10:30:00Z"
+    
+    metadata:
+      page_count: 42
+      doc_type: "textbook"
+      title: "Data Structures and Algorithms - Chapter 5"
+      toc_present: true
+      chapters_detected: true
+      two_column_layout: false
+      has_exercises: true
+      exercise_count: 15
+    
+    overrides:
+      pipeline:
+        ingestion:
+          chunking:
+            mode: "smart"  # Smart chunking handles exercises well
+            tokens_per_chunk: 2000
+      generate:
+        strategies:
+          key_points:
+            enabled: true
+            params:
+              max_cards: 6
+          cloze_definitions:
+            enabled: true
+            params:
+              max_cards: 4
+              focus_on_definitions: true
+        tags:
+          default_tags: ["pdf2anki", "algorithms", "textbook"]
+
+# Global overrides (applied to all documents unless overridden)
+global_overrides:
+  generate:
+    tags:
+      auto_generate: true
+      include_source: true
+      include_strategy: true
+    taxonomy:
+      auto_detect: true
+      hierarchical: true

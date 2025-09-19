@@ -1,0 +1,104 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+        
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install pytest
+    
+    - name: Run config tests
+      run: |
+        python -m pytest tests/test_config.py -v
+    
+    - name: Run CLI tests
+      run: |
+        python -m pytest tests/test_cli_plan_sample.py -v
+    
+    - name: Test CLI commands
+      run: |
+        # Test basic CLI functionality
+        python -c "from src.pdf2anki.cli import app; app(['--help'])"
+        python -c "from src.pdf2anki.cli import app; app(['generate', '--help'])"
+    
+    - name: Test configuration loading
+      run: |
+        # Test legacy config loading with deprecation warning
+        python -c "
+        import warnings
+        from src.pdf2anki.config import Config
+        with warnings.catch_warnings(record=True) as w:
+          warnings.simplefilter('always')
+          c = Config.from_yaml('examples/config.example.yaml')
+          assert len(w) == 1
+          assert 'Legacy configuration' in str(w[0].message)
+          print('✓ Legacy config loading with deprecation warning works')
+        "
+    
+    - name: Test YAML scalar serialization
+      run: |
+        # Test that enums serialize as scalars
+        python -c "
+        import tempfile
+        from pathlib import Path
+        from src.pdf2anki.config import Config
+        config = Config()
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+          config.to_yaml(f.name)
+          with open(f.name, 'r') as rf:
+            content = rf.read()
+            assert 'provider: openai' in content or 'provider: \"openai\"' in content
+            print('✓ YAML scalar serialization works')
+        "
+
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Install linting dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black isort flake8
+    
+    - name: Check code formatting with Black
+      run: |
+        black --check --diff src/ tests/
+    
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only --diff src/ tests/
+        
+    - name: Lint with flake8
+      run: |
+        flake8 src/ tests/ --max-line-length=88 --extend-ignore=E203,W503
