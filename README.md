@@ -1,9 +1,15 @@
 # pdf2anki
 
-pdf2anki is a Python library and CLI that converts technical PDFs (research papers, textbooks) into high‑quality Anki flashcards. It uses a two‑stage workflow:
+pdf2anki is a Python library and CLI that converts technical PDFs (research papers, textbooks) into high‑quality Anki flashcards. It uses a streamlined workflow:
 
-1) Preprocess: Ingest PDFs, chunk text intelligently, generate candidate cards via LLM strategies, and write an editable CSV plus media folder.
-2) Build: Validate the CSV and produce an .apkg deck using configurable note types and deck structure.
+1) **Scan**: Discover PDFs and extract metadata, creating or updating `documents.yaml`
+2) **Generate**: Process documents using configuration layering, chunk intelligently, generate cards via LLM strategies, and produce CSV + media
+3) **Build**: Validate the CSV and produce an .apkg deck using configurable note types and deck structure
+
+Key generation modes:
+- `--plan`: Preview generation plan and first chunk prompts (no LLM calls)
+- `--sample`: Generate sample cards from first chunk only (display-only)
+- Default: Full generation with all configured strategies
 
 Lean defaults make it easy to get started, while configuration, prompt templates, and plugin‑style strategies let you extend and control behavior.
 
@@ -19,9 +25,10 @@ Links:
 
 Features
 
-- Two-stage pipeline
-  - Preprocess: PDF ingestion, heading‑aware chunking, strategy‑based card generation (Basic & Cloze), optional reviewer pass, CSV + media output with manifest/telemetry.
-  - Build: Generate .apkg using genanki, configurable note types, deck structure (flat, by chapter, by theme, predefined), and tag policies.
+- **Document-aware pipeline**
+  - Scan: PDF discovery, metadata extraction, and `documents.yaml` management
+  - Generate: Configuration layering, heading‑aware chunking, strategy‑based card generation (Basic & Cloze), optional reviewer pass, CSV + media output with manifest/telemetry
+  - Build: Generate .apkg using genanki, configurable note types, deck structure (flat, by chapter, by theme, predefined), and tag policies
 - Math, tables, images
   - Math: preserve LaTeX ($...$, $$...$$); Anki’s MathJax renders by default.
   - Tables: heuristic text→HTML table rendering; optional Camelot/Tabula integration.
@@ -72,15 +79,17 @@ Quick start
 2) Preprocess PDFs into CSV and media
 - Edit the config (see Configuration below).
 - Run:
-  - pdf2anki preprocess --config examples/config.example.yaml
+  - pdf2anki scan-docs --config examples/config.example.yaml
+  - pdf2anki generate --config examples/config.example.yaml
 - What happens:
-  - PDFs are discovered (glob or explicit).
-  - Text is extracted and chunked near headings with token limits.
-  - Strategies (e.g., key_points, cloze_definitions) generate candidate cards using LLM templates; JSON schema enforced.
-  - Optional reviewer LLM scores/edits cards; low‑scoring cards are dropped.
-  - Hallucination guard: require page citations; verify quotes.
-  - Duplicate detection skips redundant cards.
-  - cards.csv, media/, and manifest.json written to workspace/.
+  - PDFs are discovered and analyzed for metadata and structure
+  - Document configuration is layered (base + heuristics + per-PDF overrides)
+  - Text is extracted and chunked near headings with token limits
+  - Strategies (e.g., key_points, cloze_definitions) generate candidate cards using LLM templates; JSON schema enforced
+  - Optional reviewer LLM scores/edits cards; low‑scoring cards are dropped
+  - Hallucination guard: require page citations; verify quotes
+  - Duplicate detection skips redundant cards
+  - cards.csv, media/, and manifest.json written to workspace/
 
 3) Review or edit the CSV
 - Open workspace/cards.csv in your editor.
@@ -105,17 +114,19 @@ Quick start
 CLI reference
 
 - pdf2anki init
-  - Scaffolds prompts/ and examples/config.example.yaml; creates workspace/.
-- pdf2anki preprocess --config config.yaml [--pdf path.pdf]
-  - Generates workspace/cards.csv, media/, manifest.json.
+  - Scaffolds prompts/, notes/, examples/config.example.yaml, and creates workspace/, samples/, scripts/
+- pdf2anki scan-docs --config config.yaml
+  - Discovers PDFs and creates/updates documents.yaml with metadata
+- pdf2anki generate --config config.yaml [--plan] [--sample] [--pdf path.pdf]
+  - Generates workspace/cards.csv, media/, manifest.json
+  - --plan: Shows generation plan without LLM calls
+  - --sample: Generates sample cards from first chunk only
 - pdf2anki validate --csv workspace/cards.csv
-  - Checks required columns, media references, note_type correctness, and unique IDs.
+  - Checks required columns, media references, note_type correctness, and unique IDs
 - pdf2anki build --config config.yaml
-  - Builds .apkg using CSV + media. Honors deck structure, note types, tags, and ID strategy.
+  - Builds .apkg using CSV + media. Honors deck structure, note types, tags, and ID strategy
 - pdf2anki preview --csv cards.csv --n 10
-  - Prints sample rows to terminal.
-- pdf2anki cache clear
-  - Clears LLM response cache.
+  - Prints sample rows to terminal
 
 --------------------------------------------------------------------------------
 
@@ -343,7 +354,7 @@ Run
       -v "$(pwd)":/work \
       -w /work \
       pdf2anki:local \
-      pdf2anki preprocess --config examples/config.example.yaml
+      pdf2anki generate --config examples/config.example.yaml
 
 - Build the deck from an existing CSV (no PDFs required):
   - docker run --rm -it \

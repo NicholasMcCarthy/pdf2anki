@@ -235,6 +235,8 @@ To migrate from the old workflow:
 1. Copy your existing config to `examples/config.example.yaml`
 2. Run `pdf2anki scan-docs` to create `documents.yaml`
 3. Review and adjust per-PDF settings in `documents.yaml`
-4. Use `pdf2anki generate` instead of `pdf2anki preprocess`
+4. Use `pdf2anki generate` instead of the old `preprocess` command
 
-The old commands (`preprocess`, `build`, etc.) continue to work for backward compatibility.
+**Migration Note**: The `preprocess` command has been removed. Legacy configuration files 
+will be automatically translated with deprecation warnings. The old top-level configuration 
+keys (like `llm`, `strategies`) are now organized under `pipeline` and `generate` sections.
