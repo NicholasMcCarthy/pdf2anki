@@ -64,7 +64,7 @@ class GenericStrategyRunner(StrategyRunner):
                 'chunk_text': chunk.text,
                 'page_start': chunk.start_page,
                 'page_end': chunk.end_page,
-                'section_title': chunk.section_title,
+                'section_title': chunk.section,
                 **kwargs  # Allow override of template parameters
             }
             
@@ -93,7 +93,7 @@ class GenericStrategyRunner(StrategyRunner):
                     'source_chunk_id': chunk.chunk_id if hasattr(chunk, 'chunk_id') else None,
                     'page_start': chunk.start_page,
                     'page_end': chunk.end_page,
-                    'section': chunk.section_title,
+                    'section': chunk.section,
                 })
             
             return cards

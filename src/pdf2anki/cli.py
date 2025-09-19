@@ -452,15 +452,97 @@ def _generate_sample_csv_schema(base_config: Config) -> None:
     """Generate sample CSV schema from note type templates."""
     console.print("📊 Generating sample CSV schema...", style="bold green")
     
-    # TODO: Implement CSV schema generation
-    # This should:
-    # 1. Load all note type templates from notes/ directory
-    # 2. Extract field definitions
-    # 3. Add provenance fields (id, timestamps, etc.)
-    # 4. Generate minimal CSV with headers or 1 mock row per note type
+    from .templates import get_note_type_manager
+    import csv
+    from io import StringIO
     
-    console.print("  [CSV schema generation not yet implemented]")
-    console.print("  [Would generate sample CSV with union of all note type fields]")
+    note_manager = get_note_type_manager()
+    all_note_types = note_manager.list_note_types()
+    
+    if not all_note_types:
+        console.print("❌ No note types found. Please check notes/ directory.", style="red")
+        return
+    
+    # Collect all unique fields across note types
+    all_fields = set()
+    note_type_fields = {}
+    
+    for note_type in all_note_types:
+        fields = note_manager.get_csv_fields(note_type)
+        note_type_fields[note_type] = fields
+        all_fields.update(fields)
+    
+    # Convert to sorted list for consistent output
+    all_fields = sorted(all_fields)
+    
+    # Display summary
+    console.print(f"Found {len(all_note_types)} note types:")
+    for note_type in all_note_types:
+        console.print(f"  • {note_type}: {len(note_type_fields[note_type])} fields")
+    
+    console.print(f"\nUnion of all fields: {len(all_fields)} columns")
+    
+    # Generate sample CSV content
+    output = StringIO()
+    writer = csv.writer(output)
+    
+    # Write header
+    writer.writerow(all_fields)
+    
+    # Write one sample row per note type
+    for note_type in all_note_types:
+        row = []
+        for field in all_fields:
+            if field in note_type_fields[note_type]:
+                # Generate sample data based on field name
+                if field == "id":
+                    row.append(f"card_{note_type}_001")
+                elif field == "note_type":
+                    row.append(note_type)
+                elif field == "front":
+                    row.append(f"Sample question for {note_type}")
+                elif field == "back":
+                    row.append(f"Sample answer for {note_type}")
+                elif field == "cloze_text":
+                    row.append(f"Sample {{{{c1::cloze deletion}}}} for {note_type}")
+                elif field == "extra":
+                    row.append(f"Extra context for {note_type}")
+                elif field == "deck":
+                    row.append("PDF2Anki Generated")
+                elif field == "tags":
+                    row.append(f"pdf2anki;{note_type}")
+                elif field == "source_pdf":
+                    row.append("sample.pdf")
+                elif field in ["page_start", "page_end"]:
+                    row.append("1")
+                elif field in ["created_at", "updated_at"]:
+                    row.append("2024-01-15T10:00:00Z")
+                else:
+                    row.append(f"sample_{field}")
+            else:
+                row.append("")  # Empty for fields not in this note type
+        writer.writerow(row)
+    
+    # Save to file
+    output_file = Path("sample_schema.csv")
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(output.getvalue())
+    
+    console.print(f"\n✅ Sample CSV schema saved to: {output_file}")
+    console.print(f"Preview (first 5 columns):")
+    
+    # Show preview
+    lines = output.getvalue().strip().split('\n')
+    preview_table = Table()
+    headers = lines[0].split(',')[:5]
+    for header in headers:
+        preview_table.add_column(header.strip('"'), style="cyan")
+    
+    for line in lines[1:]:
+        cols = line.split(',')[:5]
+        preview_table.add_row(*[col.strip('"') for col in cols])
+    
+    console.print(preview_table)
 
 
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool) -> None:
