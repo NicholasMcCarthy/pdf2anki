@@ -24,6 +24,7 @@ class ChunkingMode(str, Enum):
     SMART = "smart"
     FIGURES = "figures"  # New: Extract and chunk based on figures
     HIGHLIGHTS = "highlights"  # New: Extract and chunk based on highlights
+    ENTIRE = "entire"  # New: Prefer single chunk, auto-split if needed
 
 
 class DeckStructure(str, Enum):
@@ -76,6 +77,9 @@ class ChunkingConfig(BaseModel):
     respect_page_bounds: bool = True
     min_chunk_tokens: int = 100
     max_chunk_tokens: int = 4000
+    # Entire mode specific settings
+    enable_trimming: bool = True  # Enable/disable terminal section trimming
+    token_budget: int = 8000  # Max tokens before auto-splitting in entire mode
 
 
 class IngestionConfig(BaseModel):

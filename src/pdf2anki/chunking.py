@@ -44,11 +44,29 @@ class TextChunker:
     
     def __init__(self, config: ChunkingConfig, model: str = "gpt-4"):
         self.config = config
-        self.encoding = tiktoken.encoding_for_model(model)
+        try:
+            self.encoding = tiktoken.encoding_for_model(model)
+        except Exception as e:
+            logger.warning(f"Failed to load tiktoken encoding for {model}: {e}")
+            # Fallback to a simple token counter for testing
+            self.encoding = None
         
     def count_tokens(self, text: str) -> int:
         """Count tokens in text using the specified encoding."""
+        if self.encoding is None:
+            # Fallback: rough approximation of 1 token per 4 characters
+            return len(text) // 4
         return len(self.encoding.encode(text))
+    
+    def chunk_text(self, text: str, start_page: int = 1) -> List[TextChunk]:
+        """Convenience method to chunk plain text."""
+        # Create a minimal pdf_content structure for compatibility
+        pdf_content = {
+            "pages": [{"page_num": start_page, "raw_text": text}],
+            "page_count": 1,
+            "structure": {"headings": [], "sections": [], "chapters": []},
+        }
+        return self.chunk_document(pdf_content)
     
     def chunk_document(self, pdf_content: Dict) -> List[TextChunk]:
         """Chunk document based on the configured strategy."""
@@ -64,6 +82,8 @@ class TextChunker:
             return self._chunk_by_figures(pdf_content)
         elif self.config.mode == ChunkingMode.HIGHLIGHTS:
             return self._chunk_by_highlights(pdf_content)
+        elif self.config.mode == ChunkingMode.ENTIRE:
+            return self._chunk_entire(pdf_content)
         else:
             raise ValueError(f"Unknown chunking mode: {self.config.mode}")
     
@@ -463,3 +483,276 @@ class TextChunker:
         
         logger.info("Highlights-based chunking not yet implemented, falling back to smart chunking")
         return self._chunk_smart(pdf_content)
+    
+    def _chunk_entire(self, pdf_content: Dict) -> List[TextChunk]:
+        """Chunk text as entire document with optional trimming and auto-splitting."""
+        logger.info("Starting entire document chunking")
+        
+        # Extract all text from the document
+        full_text = self._extract_full_text(pdf_content)
+        
+        if not full_text.strip():
+            logger.warning("No text found in document")
+            return []
+        
+        original_tokens = self.count_tokens(full_text)
+        logger.info(f"Original document has {original_tokens} tokens ({len(full_text)} characters)")
+        
+        # Apply trimming if enabled
+        if self.config.enable_trimming:
+            logger.info("Trimming enabled - scanning for terminal sections")
+            full_text = self._trim_terminal_sections(full_text, pdf_content)
+        else:
+            logger.info("Trimming disabled - preserving full document content")
+        
+        # Check if the entire document fits within token budget
+        total_tokens = self.count_tokens(full_text)
+        logger.info(f"Final document has {total_tokens} tokens, budget is {self.config.token_budget}")
+        
+        if total_tokens <= self.config.token_budget:
+            # Create single chunk
+            logger.info("Document fits in single chunk - entire mode successful")
+            chunk = TextChunk(
+                text=full_text.strip(),
+                start_page=1,
+                end_page=pdf_content["page_count"],
+                section="Entire Document",
+                chunk_index=0,
+                total_chunks=1,
+            )
+            chunk.token_count = total_tokens
+            return [chunk]
+        else:
+            # Auto-split into large chunks
+            logger.info(f"Document exceeds token budget ({total_tokens} > {self.config.token_budget}), auto-splitting")
+            return self._auto_split_large_document(full_text, pdf_content)
+    
+    def _extract_full_text(self, pdf_content: Dict) -> str:
+        """Extract all text from the PDF document."""
+        full_text_parts = []
+        
+        for page_data in pdf_content["pages"]:
+            page_text = page_data["raw_text"].strip()
+            if page_text:
+                full_text_parts.append(page_text)
+        
+        return "\n\n".join(full_text_parts)
+    
+    def _trim_terminal_sections(self, text: str, pdf_content: Dict) -> str:
+        """Trim terminal sections like References, Bibliography, etc."""
+        original_length = len(text)
+        original_tokens = self.count_tokens(text)
+        
+        # Define patterns for terminal sections to remove
+        terminal_patterns = [
+            r'\n\s*(References|REFERENCES)\s*\n.*$',
+            r'\n\s*(Bibliography|BIBLIOGRAPHY)\s*\n.*$',
+            r'\n\s*(Works Cited|WORKS CITED)\s*\n.*$',
+            r'\n\s*(Appendix|APPENDIX)\s*\n.*$',
+            r'\n\s*(Supplementary Material|SUPPLEMENTARY MATERIAL)\s*\n.*$',
+            r'\n\s*(Acknowledgments|ACKNOWLEDGMENTS|Acknowledgements|ACKNOWLEDGEMENTS)\s*\n.*$',
+        ]
+        
+        trimmed_text = text
+        sections_removed = []
+        
+        for pattern in terminal_patterns:
+            match = re.search(pattern, trimmed_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                section_start = match.group(1) if match.groups() else "Unknown"
+                sections_removed.append(section_start)
+                trim_boundary_pos = match.start()
+                trimmed_text = trimmed_text[:match.start()] + "\n"
+                
+                # Log the trim decision with detailed boundary information
+                chars_removed = len(text) - len(trimmed_text)
+                logger.info(f"TRIM DECISION: Removed terminal section '{section_start}'")
+                logger.info(f"TRIM BOUNDARY: Position {trim_boundary_pos} in document")
+                logger.info(f"TRIM IMPACT: Removed {chars_removed} characters")
+        
+        # Ensure we don't remove conclusions
+        conclusion_patterns = [
+            r'\n\s*(Conclusion|CONCLUSION|Conclusions|CONCLUSIONS)\s*\n',
+            r'\n\s*(Summary|SUMMARY)\s*\n',
+            r'\n\s*(Final Thoughts|FINAL THOUGHTS)\s*\n',
+        ]
+        
+        # If we accidentally trimmed conclusions, warn about it
+        for pattern in conclusion_patterns:
+            if re.search(pattern, text, re.IGNORECASE) and not re.search(pattern, trimmed_text, re.IGNORECASE):
+                logger.warning("WARNING: Conclusion section may have been removed during trimming - consider adjusting patterns")
+        
+        final_tokens = self.count_tokens(trimmed_text)
+        tokens_saved = original_tokens - final_tokens
+        
+        if sections_removed:
+            logger.info(f"TRIM SUMMARY: Removed sections: {', '.join(sections_removed)}")
+            logger.info(f"TRIM SUMMARY: Text reduced from {original_length} to {len(trimmed_text)} characters")
+            logger.info(f"TRIM SUMMARY: Tokens reduced from {original_tokens} to {final_tokens} (saved {tokens_saved} tokens)")
+        else:
+            logger.info("TRIM SUMMARY: No terminal sections found to trim")
+        
+        return trimmed_text.strip()
+    
+    def _auto_split_large_document(self, text: str, pdf_content: Dict) -> List[TextChunk]:
+        """Auto-split large document into sequential chunks within token budget."""
+        chunks = []
+        
+        # Try to split at section boundaries first
+        sections = self._detect_section_boundaries(text)
+        
+        if len(sections) > 1:
+            logger.info(f"Found {len(sections)} sections, splitting at section boundaries")
+            return self._split_by_detected_sections(sections, pdf_content)
+        
+        # Fall back to paragraph-based splitting for large chunks
+        logger.info("No clear sections found, splitting by paragraphs into large chunks")
+        paragraphs = self._split_into_paragraphs(text)
+        
+        current_chunk_text = ""
+        chunk_paragraphs = []
+        
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                continue
+            
+            potential_text = current_chunk_text + "\n\n" + paragraph if current_chunk_text else paragraph
+            token_count = self.count_tokens(potential_text)
+            
+            if token_count > self.config.token_budget and current_chunk_text:
+                # Create chunk
+                chunk = TextChunk(
+                    text=current_chunk_text.strip(),
+                    start_page=1,  # We don't have precise page mapping in entire mode
+                    end_page=pdf_content["page_count"],
+                    section=f"Document Part {len(chunks) + 1}",
+                    chunk_index=len(chunks),
+                )
+                chunk.token_count = self.count_tokens(chunk.text)
+                chunks.append(chunk)
+                
+                # Start new chunk with minimal overlap for large chunks
+                overlap_paras = chunk_paragraphs[-1:] if chunk_paragraphs else []
+                overlap_text = "\n\n".join(overlap_paras)
+                current_chunk_text = overlap_text + "\n\n" + paragraph if overlap_text else paragraph
+                chunk_paragraphs = overlap_paras + [paragraph]
+            else:
+                current_chunk_text = potential_text
+                chunk_paragraphs.append(paragraph)
+        
+        # Add final chunk
+        if current_chunk_text:
+            chunk = TextChunk(
+                text=current_chunk_text.strip(),
+                start_page=1,
+                end_page=pdf_content["page_count"],
+                section=f"Document Part {len(chunks) + 1}",
+                chunk_index=len(chunks),
+            )
+            chunk.token_count = self.count_tokens(chunk.text)
+            chunks.append(chunk)
+        
+        # Update total chunks count
+        for chunk in chunks:
+            chunk.total_chunks = len(chunks)
+        
+        logger.info(f"Created {len(chunks)} large chunks using auto-split in entire mode")
+        return chunks
+    
+    def _detect_section_boundaries(self, text: str) -> List[Dict]:
+        """Detect major section boundaries in the text."""
+        sections = []
+        
+        # Common academic paper section patterns
+        section_patterns = [
+            r'^(Abstract|ABSTRACT)\s*$',
+            r'^(Introduction|INTRODUCTION)\s*$',
+            r'^(Methods|METHODS|Methodology|METHODOLOGY)\s*$',
+            r'^(Results|RESULTS)\s*$',
+            r'^(Discussion|DISCUSSION)\s*$',
+            r'^(Conclusion|CONCLUSION|Conclusions|CONCLUSIONS)\s*$',
+            r'^(\d+\.?\s+[A-Z][^.\n]*)\s*$',  # Numbered sections like "1. Introduction"
+            r'^([A-Z][A-Z\s]{3,})\s*$',  # ALL CAPS headers
+        ]
+        
+        lines = text.split('\n')
+        current_section = {"start": 0, "title": "Beginning", "text": ""}
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            
+            for pattern in section_patterns:
+                if re.match(pattern, line_stripped, re.MULTILINE):
+                    # End current section
+                    if current_section["text"].strip():
+                        sections.append(current_section)
+                    
+                    # Start new section
+                    current_section = {
+                        "start": i,
+                        "title": line_stripped,
+                        "text": ""
+                    }
+                    break
+            else:
+                # Add line to current section
+                current_section["text"] += line + "\n"
+        
+        # Add final section
+        if current_section["text"].strip():
+            sections.append(current_section)
+        
+        return sections
+    
+    def _split_by_detected_sections(self, sections: List[Dict], pdf_content: Dict) -> List[TextChunk]:
+        """Split document by detected sections, grouping small sections together."""
+        chunks = []
+        current_chunk_text = ""
+        current_sections = []
+        
+        for section in sections:
+            section_text = section["text"].strip()
+            if not section_text:
+                continue
+            
+            potential_text = current_chunk_text + "\n\n" + section_text if current_chunk_text else section_text
+            token_count = self.count_tokens(potential_text)
+            
+            if token_count > self.config.token_budget and current_chunk_text:
+                # Create chunk from accumulated sections
+                section_titles = [s["title"] for s in current_sections]
+                chunk = TextChunk(
+                    text=current_chunk_text.strip(),
+                    start_page=1,
+                    end_page=pdf_content["page_count"],
+                    section=" + ".join(section_titles),
+                    chunk_index=len(chunks),
+                )
+                chunk.token_count = self.count_tokens(chunk.text)
+                chunks.append(chunk)
+                
+                # Start new chunk
+                current_chunk_text = section_text
+                current_sections = [section]
+            else:
+                current_chunk_text = potential_text
+                current_sections.append(section)
+        
+        # Add final chunk
+        if current_chunk_text:
+            section_titles = [s["title"] for s in current_sections]
+            chunk = TextChunk(
+                text=current_chunk_text.strip(),
+                start_page=1,
+                end_page=pdf_content["page_count"],
+                section=" + ".join(section_titles),
+                chunk_index=len(chunks),
+            )
+            chunk.token_count = self.count_tokens(chunk.text)
+            chunks.append(chunk)
+        
+        # Update total chunks count
+        for chunk in chunks:
+            chunk.total_chunks = len(chunks)
+        
+        return chunks
