@@ -1,0 +1,144 @@
+# PDF2Anki Configuration Example
+# This file contains all available configuration options with sensible defaults
+
+# Project metadata
+project:
+  name: "My PDF2Anki Project"
+  version: "1.0"
+  author: "Your Name"
+  description: "Converting academic PDFs to Anki flashcards"
+
+# Input PDF configuration
+inputs:
+  paths:
+    - "pdfs/"  # Directory containing PDFs
+    # - "research/paper1.pdf"  # Specific PDF file
+  patterns:
+    - "*.pdf"
+  recursive: true
+
+# PDF ingestion settings
+ingestion:
+  mode: "extract_text"
+  chunking:
+    mode: "smart"  # Options: pages, sections, paragraphs, smart
+    tokens_per_chunk: 2000
+    overlap_tokens: 200
+    respect_page_bounds: true
+    min_chunk_tokens: 100
+    max_chunk_tokens: 4000
+  extract_images: true
+  extract_tables: false
+  ocr_fallback: false
+
+# LLM configuration
+llm:
+  provider: "openai"  # Currently only OpenAI is supported
+  model: "gpt-4-1106-preview"  # Recommended for best results
+  temperature: 0.0  # Use 0.0 for consistent results
+  seed: 42  # For reproducible outputs (when supported)
+  max_tokens: null  # Let the model decide
+  api_key: "${OPENAI_API_KEY}"  # Reference to environment variable
+  base_url: null  # Use default OpenAI endpoint
+  timeout: 120
+  max_retries: 3
+
+# Generation strategies
+strategies:
+  key_points:
+    enabled: true
+    template_version: "1.0"
+    params:
+      max_cards: 5
+    min_score: null  # No quality filter
+  
+  cloze_definitions:
+    enabled: true
+    template_version: "1.0"
+    params:
+      max_cards: 3
+      focus_on_definitions: true
+    min_score: null
+  
+  figure_based:
+    enabled: false  # Disable by default as it requires visual content
+    template_version: "1.0"
+    params:
+      max_cards: 2
+    min_score: null
+
+# RAG-lite configuration (optional)
+rag:
+  enabled: false  # Disable by default
+  provider: "faiss"  # Options: faiss, chroma
+  embedding_model: "text-embedding-3-large"
+  k: 5
+  index_path: null  # Will use workspace/rag_index if enabled
+
+# Deduplication settings
+deduplication:
+  enabled: true
+  fuzzy_threshold: 0.85  # 85% similarity threshold
+  embedding_threshold: 0.9  # 90% embedding similarity
+  policy: "or"  # Options: or, and
+  scope_within_run: true
+  scope_persistent: false  # Disable cross-run deduplication by default
+  index_path: null  # Will use workspace/dedup_index.json if persistent enabled
+
+# Hallucination mitigation
+hallucination:
+  require_citations: true
+  verify_quotes: true
+  drop_on_failure: true
+
+# Review step (optional)
+review:
+  enabled: false  # Disable by default as it doubles token usage
+  min_score: 7.0
+  allow_edits: true
+  template_version: "1.0"
+
+# Tagging configuration
+tags:
+  default_tags: ["pdf2anki"]
+  auto_generate: true
+  include_source: true
+  include_strategy: true
+
+# Content taxonomy
+taxonomy:
+  auto_detect: true
+  hierarchical: true
+  max_depth: 3
+
+# ID generation
+ids:
+  strategy: "content_hash"  # Options: content_hash, persistent
+  salt: "pdf2anki"
+
+# Language settings
+language: "en"
+
+# Anki deck configuration
+anki:
+  deck_name: "PDF2Anki Generated"
+  deck_id: null  # Will be auto-generated
+  deck_structure: "flat"  # Options: flat, by_chapter, by_theme, predefined
+  note_types: {}  # Use default note types
+  preserve_latex: true
+
+# Output paths (relative to working directory)
+output:
+  workspace: "workspace"
+  csv_path: "workspace/cards.csv"
+  media_path: "workspace/media"
+  apkg_path: "workspace/deck.apkg"
+  manifest_path: "workspace/manifest.json"
+
+# Telemetry and monitoring
+telemetry:
+  enabled: true
+  track_tokens: true
+  track_costs: true
+  track_timing: true
+  track_cache_hits: true

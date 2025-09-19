@@ -1,0 +1,45 @@
+You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start }}-{{ page_end }}):
+
+{% if section %}
+**Section**: {{ section }}
+{% endif %}
+
+**Text Content**:
+{{ chunk }}
+
+---
+
+**Task**: Generate {{ max_cards | default(5) }} high-quality Anki flashcards that focus on the key points from this text. Each flashcard should test important concepts, facts, or relationships.
+
+**Requirements**:
+1. Create clear, specific questions that test understanding
+2. Focus on the most important and testable content
+3. Include page citations in the format "p. {{ page_start }}"
+4. Avoid overly broad or vague questions
+5. Use active recall principles
+6. Generate a mix of question types (factual, conceptual, application)
+
+**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+
+```json
+{
+  "cards": [
+    {
+      "front": "Clear, specific question",
+      "back": "Complete answer with explanation",
+      "page_citation": "p. {{ page_start }}",
+      "core_concept": "Main concept being tested",
+      "difficulty": "easy|medium|hard",
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+```
+
+**Example Good Questions**:
+- "What is the definition of [specific term] as presented in this context?"
+- "According to the text, what are the three main factors that influence [concept]?"
+- "How does [concept A] relate to [concept B] in this framework?"
+- "What evidence does the author provide to support [specific claim]?"
+
+Generate the flashcards now:
