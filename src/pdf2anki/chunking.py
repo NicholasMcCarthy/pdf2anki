@@ -495,17 +495,23 @@ class TextChunker:
             logger.warning("No text found in document")
             return []
         
+        original_tokens = self.count_tokens(full_text)
+        logger.info(f"Original document has {original_tokens} tokens ({len(full_text)} characters)")
+        
         # Apply trimming if enabled
         if self.config.enable_trimming:
+            logger.info("Trimming enabled - scanning for terminal sections")
             full_text = self._trim_terminal_sections(full_text, pdf_content)
+        else:
+            logger.info("Trimming disabled - preserving full document content")
         
         # Check if the entire document fits within token budget
         total_tokens = self.count_tokens(full_text)
-        logger.info(f"Full document has {total_tokens} tokens, budget is {self.config.token_budget}")
+        logger.info(f"Final document has {total_tokens} tokens, budget is {self.config.token_budget}")
         
         if total_tokens <= self.config.token_budget:
             # Create single chunk
-            logger.info("Document fits in single chunk")
+            logger.info("Document fits in single chunk - entire mode successful")
             chunk = TextChunk(
                 text=full_text.strip(),
                 start_page=1,
@@ -535,6 +541,7 @@ class TextChunker:
     def _trim_terminal_sections(self, text: str, pdf_content: Dict) -> str:
         """Trim terminal sections like References, Bibliography, etc."""
         original_length = len(text)
+        original_tokens = self.count_tokens(text)
         
         # Define patterns for terminal sections to remove
         terminal_patterns = [
@@ -554,11 +561,14 @@ class TextChunker:
             if match:
                 section_start = match.group(1) if match.groups() else "Unknown"
                 sections_removed.append(section_start)
+                trim_boundary_pos = match.start()
                 trimmed_text = trimmed_text[:match.start()] + "\n"
                 
-                # Log the trim decision
+                # Log the trim decision with detailed boundary information
                 chars_removed = len(text) - len(trimmed_text)
-                logger.info(f"Trimmed terminal section '{section_start}' - removed {chars_removed} characters")
+                logger.info(f"TRIM DECISION: Removed terminal section '{section_start}'")
+                logger.info(f"TRIM BOUNDARY: Position {trim_boundary_pos} in document")
+                logger.info(f"TRIM IMPACT: Removed {chars_removed} characters")
         
         # Ensure we don't remove conclusions
         conclusion_patterns = [
@@ -570,13 +580,17 @@ class TextChunker:
         # If we accidentally trimmed conclusions, warn about it
         for pattern in conclusion_patterns:
             if re.search(pattern, text, re.IGNORECASE) and not re.search(pattern, trimmed_text, re.IGNORECASE):
-                logger.warning("Warning: Conclusion section may have been removed during trimming")
+                logger.warning("WARNING: Conclusion section may have been removed during trimming - consider adjusting patterns")
+        
+        final_tokens = self.count_tokens(trimmed_text)
+        tokens_saved = original_tokens - final_tokens
         
         if sections_removed:
-            logger.info(f"Trimming complete. Removed sections: {', '.join(sections_removed)}")
-            logger.info(f"Text reduced from {original_length} to {len(trimmed_text)} characters")
+            logger.info(f"TRIM SUMMARY: Removed sections: {', '.join(sections_removed)}")
+            logger.info(f"TRIM SUMMARY: Text reduced from {original_length} to {len(trimmed_text)} characters")
+            logger.info(f"TRIM SUMMARY: Tokens reduced from {original_tokens} to {final_tokens} (saved {tokens_saved} tokens)")
         else:
-            logger.info("No terminal sections found to trim")
+            logger.info("TRIM SUMMARY: No terminal sections found to trim")
         
         return trimmed_text.strip()
     
