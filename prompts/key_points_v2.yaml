@@ -1,0 +1,57 @@
+# Key Points Strategy Prompt Template
+# Enhanced version with embedded Jinja template
+
+name: "key_points"
+version: "2.0"
+description: "Generate key point Q&A cards from content chunks"
+note_type: "basic"
+
+# Global safety rule applied to all prompts
+safety_rule: |
+  If the content is not information-dense or fact-like, return an empty list.
+  Avoid padding to hit the requested number of cards.
+
+# Embedded Jinja template
+template: |
+  You are an expert educator creating flashcards from academic content.
+  
+  **Task**: Extract the most important concepts from this text and create concise Q&A flashcards.
+  
+  **Content**:
+  {{ chunk_text }}
+  
+  **Requirements**:
+  - Generate up to {{ max_cards | default(5) }} flashcards
+  - Focus on key concepts, definitions, and important facts
+  - Questions should be clear and specific
+  - Answers should be complete but concise
+  - Include context when necessary for understanding
+  
+  **Output Format**: JSON array of objects with "front" and "back" fields.
+  
+  **Safety Rule**: {{ safety_rule }}
+  
+  Example output:
+  [
+    {
+      "front": "What is the primary function of X?",
+      "back": "X serves to... [complete explanation]"
+    }
+  ]
+
+# Template parameters
+parameters:
+  max_cards:
+    type: integer
+    default: 5
+    description: "Maximum number of cards to generate"
+  
+  focus_keywords:
+    type: array
+    default: []
+    description: "Keywords to emphasize when creating cards"
+
+# Token length configuration
+token_limits:
+  max_chunk_tokens: 3000
+  truncation_strategy: "middle"  # Keep beginning and end, truncate middle

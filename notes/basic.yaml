@@ -1,0 +1,33 @@
+# Basic Note Type Definition
+# This defines a simple Q&A flashcard format
+
+name: "basic"
+version: "1.0"
+description: "Basic question and answer flashcard format"
+
+# Field definitions (excluding provenance fields like id, timestamps, deck, etc.)
+fields:
+  front:
+    description: "Question or prompt text"
+    llm_instructions: "Create a clear, concise question that tests understanding of the key concept"
+    required: true
+    
+  back:
+    description: "Answer or explanation text"
+    llm_instructions: "Provide a complete but concise answer with context if needed"
+    required: true
+
+# CSV output configuration
+rendering:
+  csv_fields_order:
+    - front
+    - back
+
+# Validation rules
+validation:
+  require_non_empty:
+    - front
+    - back
+  max_length:
+    front: 500
+    back: 1000

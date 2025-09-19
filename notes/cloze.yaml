@@ -1,0 +1,34 @@
+# Cloze Note Type Definition
+# This defines a cloze deletion flashcard format
+
+name: "cloze"
+version: "1.0"
+description: "Cloze deletion flashcard format for fill-in-the-blank style learning"
+
+# Field definitions (excluding provenance fields like id, timestamps, deck, etc.)
+fields:
+  cloze_text:
+    description: "Text with cloze deletions using {{c1::answer}} syntax"
+    llm_instructions: "Create cloze deletions using {{c1::text}} format. Use c2, c3, etc. for multiple deletions in same card"
+    required: true
+    
+  extra:
+    description: "Additional context or explanation (optional)"
+    llm_instructions: "Provide helpful context or mnemonics that appear on both sides of the card"
+    required: false
+
+# CSV output configuration
+rendering:
+  csv_fields_order:
+    - cloze_text
+    - extra
+
+# Validation rules
+validation:
+  require_non_empty:
+    - cloze_text
+  max_length:
+    cloze_text: 800
+    extra: 500
+  custom_validators:
+    - validate_cloze_syntax  # Ensures proper {{c1::}} format

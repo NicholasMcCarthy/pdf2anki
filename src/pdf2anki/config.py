@@ -22,6 +22,8 @@ class ChunkingMode(str, Enum):
     SECTIONS = "sections"
     PARAGRAPHS = "paragraphs"
     SMART = "smart"
+    FIGURES = "figures"  # New: Extract and chunk based on figures
+    HIGHLIGHTS = "highlights"  # New: Extract and chunk based on highlights
 
 
 class DeckStructure(str, Enum):
@@ -42,6 +44,13 @@ class DeduplicationPolicy(str, Enum):
     """Deduplication merge policies."""
     OR = "or"
     AND = "and"
+
+
+class DocumentType(str, Enum):
+    """Detected document types."""
+    RESEARCH_PAPER = "research_paper"
+    TEXTBOOK = "textbook"
+    UNKNOWN = "unknown"
 
 
 class ProjectConfig(BaseModel):
@@ -196,6 +205,94 @@ class TelemetryConfig(BaseModel):
     track_cache_hits: bool = True
 
 
+class DocumentMetadata(BaseModel):
+    """Metadata extracted from PDF document."""
+    page_count: int
+    toc_present: bool = False
+    chapters_detected: bool = False
+    abstract_present: bool = False
+    references_present: bool = False
+    two_column_layout: bool = False
+    has_doi: bool = False
+    doc_type: DocumentType = DocumentType.UNKNOWN
+    file_size: Optional[int] = None
+    created_date: Optional[str] = None
+    modified_date: Optional[str] = None
+
+
+class DocumentConfig(BaseModel):
+    """Per-document configuration with metadata and overrides."""
+    # File information
+    file_path: str
+    file_hash: Optional[str] = None
+    
+    # Extracted metadata (populated by scan-docs)
+    metadata: Optional[DocumentMetadata] = None
+    
+    # Heuristic defaults (populated by scan-docs)
+    heuristic_chunking: Optional[ChunkingConfig] = None
+    heuristic_strategies: Optional[List[str]] = None
+    
+    # Explicit overrides (user-defined)
+    override_chunking: Optional[ChunkingConfig] = None
+    override_strategies: Optional[List[str]] = None
+    override_ingestion: Optional[IngestionConfig] = None
+    
+    # Processing flags
+    enabled: bool = True
+    last_scanned: Optional[str] = None
+
+
+class DocumentsConfig(BaseModel):
+    """Root documents.yaml configuration."""
+    version: str = "1.0"
+    documents: Dict[str, DocumentConfig] = Field(default_factory=dict)
+    global_overrides: Optional[Dict[str, Any]] = None
+    
+    @classmethod
+    def from_yaml(cls, path: Union[str, Path]) -> "DocumentsConfig":
+        """Load documents configuration from YAML file."""
+        if not Path(path).exists():
+            return cls()
+        
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return cls(**data)
+    
+    def to_yaml(self, path: Union[str, Path]) -> None:
+        """Save documents configuration to YAML file."""
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
+    
+    def get_effective_config(self, document_key: str, base_config: "Config") -> "Config":
+        """
+        Compute effective configuration for a document using layering precedence:
+        1. Global defaults from base_config
+        2. Heuristic defaults per-PDF
+        3. Explicit per-PDF overrides
+        4. CLI overrides (handled by caller)
+        """
+        # TODO: Implement configuration layering logic
+        # For now, return base config as-is
+        return base_config
+    
+    def add_or_update_document(self, file_path: str, metadata: DocumentMetadata) -> None:
+        """Add or update a document in the configuration."""
+        key = str(Path(file_path).name)  # Use filename as key
+        
+        if key in self.documents:
+            # Update existing document
+            self.documents[key].metadata = metadata
+            self.documents[key].last_scanned = str(Path().cwd())  # TODO: Use proper timestamp
+        else:
+            # Add new document
+            self.documents[key] = DocumentConfig(
+                file_path=file_path,
+                metadata=metadata,
+                last_scanned=str(Path().cwd())  # TODO: Use proper timestamp
+            )
+
+
 class Config(BaseSettings):
     """Complete pdf2anki configuration."""
     
@@ -231,7 +328,7 @@ class Config(BaseSettings):
     def to_yaml(self, path: Union[str, Path]) -> None:
         """Save configuration to YAML file."""
         with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(self.dict(), f, default_flow_style=False, indent=2)
+            yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
 
     def create_workspace(self) -> None:
         """Create workspace directories."""

@@ -60,6 +60,10 @@ class TextChunker:
             return self._chunk_by_paragraphs(pdf_content)
         elif self.config.mode == ChunkingMode.SMART:
             return self._chunk_smart(pdf_content)
+        elif self.config.mode == ChunkingMode.FIGURES:
+            return self._chunk_by_figures(pdf_content)
+        elif self.config.mode == ChunkingMode.HIGHLIGHTS:
+            return self._chunk_by_highlights(pdf_content)
         else:
             raise ValueError(f"Unknown chunking mode: {self.config.mode}")
     
@@ -434,3 +438,28 @@ class TextChunker:
         overlap_text = " ".join(overlap_words)
         
         return overlap_text + "\n\n" + new_text
+    
+    def _chunk_by_figures(self, pdf_content: Dict) -> List[TextChunk]:
+        """Chunk text by figures and their associated content."""
+        # TODO: Implement figure-based chunking
+        # This should:
+        # 1. Identify figures/images in the PDF
+        # 2. Extract surrounding text context for each figure
+        # 3. Create chunks that combine figure references with relevant text
+        # 4. Include figure metadata (captions, page numbers, etc.)
+        
+        logger.info("Figure-based chunking not yet implemented, falling back to smart chunking")
+        return self._chunk_smart(pdf_content)
+    
+    def _chunk_by_highlights(self, pdf_content: Dict) -> List[TextChunk]:
+        """Chunk text by highlighted content and annotations."""
+        # TODO: Implement highlights-based chunking
+        # This should:
+        # 1. Extract highlighted text from PDF annotations
+        # 2. Extract text annotations/comments
+        # 3. Create chunks based on highlighted regions
+        # 4. Include surrounding context for highlights
+        # 5. Preserve highlight metadata (color, author, date)
+        
+        logger.info("Highlights-based chunking not yet implemented, falling back to smart chunking")
+        return self._chunk_smart(pdf_content)
