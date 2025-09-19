@@ -367,7 +367,7 @@ Login to GHCR (local)
 
 Build and tag
 - OWNER=YourGitHubUserOrOrg
-- VERSION=0.1.0
+- VERSION=0.2.0
 - docker build -t ghcr.io/$OWNER/pdf2anki:$VERSION .
 - Optionally include OCR:
   - docker build --build-arg INSTALL_OCR=true -t ghcr.io/$OWNER/pdf2anki:$VERSION .
@@ -381,8 +381,8 @@ Latest tag (optional)
 
 Via GitHub Actions (recommended)
 - This repo includes a release workflow that builds and pushes to GHCR on tags v*.*.* automatically (using GITHUB_TOKEN). See .github/workflows/release.yml. Create a tag:
-  - git tag v0.1.0
-  - git push origin v0.1.0
+  - git tag v0.2.0
+  - git push origin v0.2.0
 
 --------------------------------------------------------------------------------
 

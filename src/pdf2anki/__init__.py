@@ -2,7 +2,7 @@
 pdf2anki: Convert PDF documents to Anki flashcards using LLMs.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Nicholas McCarthy"
 __email__ = "nicholas@example.com"
 

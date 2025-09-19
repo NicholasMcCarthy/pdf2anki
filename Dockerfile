@@ -78,5 +78,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Labels
 LABEL maintainer="Nicholas McCarthy <nicholas@example.com>"
 LABEL description="Convert PDF documents to Anki flashcards using LLMs"
-LABEL version="0.1.0"
+LABEL version="0.2.0"
 LABEL org.opencontainers.image.source="https://github.com/NicholasMcCarthy/pdf2anki"
