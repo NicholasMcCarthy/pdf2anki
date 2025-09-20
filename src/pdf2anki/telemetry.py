@@ -34,6 +34,9 @@ class TelemetryCollector:
         self.card_count = 0
         self.error_count = 0
         
+        # Reviewer metrics
+        self.reviewer_metrics = None
+        
         # Timing metrics
         self.phase_timings: Dict[str, float] = {}
         self.current_phase_start: Optional[float] = None
@@ -133,6 +136,32 @@ class TelemetryCollector:
         if strategy and strategy in self.strategy_metrics:
             self.strategy_metrics[strategy]["errors"] += 1
     
+    def record_reviewer_metrics(self, cards_reviewed: int, cards_dropped: int, cards_edited: int,
+                               llm_stats: Dict[str, Any], config: Dict[str, Any]) -> None:
+        """Record metrics from the reviewer step."""
+        if not self.enabled:
+            return
+            
+        self.reviewer_metrics = {
+            "cards_reviewed": cards_reviewed,
+            "cards_dropped": cards_dropped,
+            "cards_edited": cards_edited,
+            "drop_rate": round(cards_dropped / max(1, cards_reviewed), 3),
+            "edit_rate": round(cards_edited / max(1, cards_reviewed), 3),
+            "min_score_threshold": config.get("min_score", 0.0),
+            "template_version": config.get("template_version", "unknown"),
+            "tokens_used": llm_stats.get("total_tokens", 0),
+            "estimated_cost": llm_stats.get("total_cost", 0.0),
+            "cache_hits": llm_stats.get("cache_hits", 0),
+            "api_calls": llm_stats.get("api_calls", 0)
+        }
+        
+        # Update global counters  
+        self.tokens_used += llm_stats.get("total_tokens", 0)
+        self.estimated_cost += llm_stats.get("total_cost", 0.0)
+        self.cache_hits += llm_stats.get("cache_hits", 0)
+        self.api_calls += llm_stats.get("api_calls", 0)
+    
     def get_manifest_data(self, model_name: str = None) -> Dict[str, Any]:
         """Get telemetry data for inclusion in manifest."""
         if not self.enabled:
@@ -197,6 +226,10 @@ class TelemetryCollector:
             "errors": self.error_count,
             "strategies_used": list(self.strategy_metrics.keys()),
         }
+        
+        # Add reviewer metrics if enabled
+        if self.reviewer_metrics:
+            manifest["telemetry"]["reviewer"] = self.reviewer_metrics
         
         # Add strategy breakdown
         if self.strategy_metrics:
