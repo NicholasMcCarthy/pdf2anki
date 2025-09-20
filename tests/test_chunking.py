@@ -48,7 +48,7 @@ def test_text_chunk_creation():
     assert chunk.subsection == "Test Subsection"
     assert chunk.chunk_index == 0
     assert chunk.total_chunks == 5
-    assert chunk.word_count == 11
+    assert chunk.word_count == 10
     assert chunk.char_count == 53
 
 

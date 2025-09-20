@@ -363,3 +363,16 @@ def extract_pdf_content(
     
     logger.info(f"Extracted content from {pdf_doc.page_count} pages with {len(images)} images")
     return content
+
+
+class PDFProcessor:
+    """Simple wrapper around extract_pdf_content for compatibility."""
+    
+    def extract_text(self, pdf_path: Path, max_pages: Optional[int] = None, **kwargs):
+        """Extract text from PDF, compatible with CLI expectations."""
+        content = extract_pdf_content(pdf_path, **kwargs)
+        # If max_pages specified, limit the content
+        if max_pages is not None:
+            content["pages"] = content["pages"][:max_pages]
+            content["page_count"] = min(content["page_count"], max_pages)
+        return content

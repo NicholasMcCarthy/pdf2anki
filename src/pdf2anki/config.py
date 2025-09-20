@@ -400,6 +400,11 @@ class Config(BaseSettings):
         yaml.add_representer(DeduplicationPolicy, represent_enum)
         yaml.add_representer(DocumentType, represent_enum)
         yaml.add_representer(Path, represent_path)
+        # Support for different pathlib types
+        import pathlib
+        yaml.add_representer(pathlib.PosixPath, represent_path)
+        yaml.add_representer(pathlib.WindowsPath, represent_path)
+        yaml.add_representer(pathlib.PurePath, represent_path)
         
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
