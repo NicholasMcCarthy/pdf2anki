@@ -19,12 +19,15 @@ def test_generate_plan_mode_no_documents_file():
         
         # Should exit with error when documents.yaml doesn't exist
         with patch('pdf2anki.cli.console') as mock_console:
-            with patch('typer.Exit') as mock_exit:
+            try:
                 app(['generate', '--plan', '--documents', str(documents_file)])
-                
-                # Should print error message about missing documents.yaml
-                mock_console.print.assert_called()
-                mock_exit.assert_called_with(1)
+                assert False, "Expected typer.Exit to be raised"
+            except SystemExit as e:
+                # typer.Exit gets converted to SystemExit
+                assert e.code == 1
+            
+            # Should print error message about missing documents.yaml
+            mock_console.print.assert_called()
 
 
 def test_generate_sample_mode_no_documents_file():
@@ -35,12 +38,15 @@ def test_generate_sample_mode_no_documents_file():
         
         # Should exit with error when documents.yaml doesn't exist
         with patch('pdf2anki.cli.console') as mock_console:
-            with patch('typer.Exit') as mock_exit:
+            try:
                 app(['generate', '--sample', '--documents', str(documents_file)])
-                
-                # Should print error message about missing documents.yaml
-                mock_console.print.assert_called()
-                mock_exit.assert_called_with(1)
+                assert False, "Expected typer.Exit to be raised"
+            except SystemExit as e:
+                # typer.Exit gets converted to SystemExit
+                assert e.code == 1
+            
+            # Should print error message about missing documents.yaml
+            mock_console.print.assert_called()
 
 
 def test_generate_plan_sample_csv_mode():
