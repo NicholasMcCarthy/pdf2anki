@@ -100,6 +100,14 @@ class TextChunker:
             if not page_text:
                 continue
             
+            # Check if this single page exceeds token limits and needs splitting
+            page_token_count = self.count_tokens(page_text)
+            if page_token_count > self.config.tokens_per_chunk:
+                # Page exceeds preferred chunk size, split it
+                page_chunks = self._split_large_text(page_text, page_num, page_num, target_tokens=self.config.tokens_per_chunk)
+                chunks.extend(page_chunks)
+                continue
+            
             # Check if adding this page exceeds token limit
             potential_text = current_text + "\n\n" + page_text if current_text else page_text
             token_count = self.count_tokens(potential_text)
@@ -341,11 +349,14 @@ class TextChunker:
         
         return section_text.strip()
     
-    def _split_large_text(self, text: str, start_page: int, end_page: int, section_title: str = None) -> List[TextChunk]:
+    def _split_large_text(self, text: str, start_page: int, end_page: int, section_title: str = None, target_tokens: Optional[int] = None) -> List[TextChunk]:
         """Split large text into smaller chunks with overlap."""
         chunks = []
         
-        if self.count_tokens(text) <= self.config.tokens_per_chunk:
+        # Use max_chunk_tokens as the target size for splitting large text (unless specified)
+        target_tokens = target_tokens or self.config.max_chunk_tokens
+        
+        if self.count_tokens(text) <= target_tokens:
             # Text fits in one chunk
             chunk = TextChunk(
                 text=text,
@@ -371,7 +382,7 @@ class TextChunker:
             potential_chunk = current_chunk + "\n\n" + paragraph if current_chunk else paragraph
             token_count = self.count_tokens(potential_chunk)
             
-            if token_count > self.config.tokens_per_chunk and current_chunk:
+            if token_count > target_tokens and current_chunk:
                 # Create chunk
                 chunk = TextChunk(
                     text=current_chunk.strip(),
@@ -383,12 +394,19 @@ class TextChunker:
                 chunk.token_count = self.count_tokens(chunk.text)
                 chunks.append(chunk)
                 
-                # Start new chunk with overlap
+                # Start new chunk with overlap, but ensure we don't exceed limits
                 overlap_paras = chunk_paragraphs[-2:] if len(chunk_paragraphs) >= 2 else chunk_paragraphs
                 overlap_text = "\n\n".join(overlap_paras)
                 
-                current_chunk = overlap_text + "\n\n" + paragraph if overlap_text else paragraph
-                chunk_paragraphs = overlap_paras + [paragraph]
+                # Check if overlap plus new paragraph exceeds target
+                potential_new_chunk = overlap_text + "\n\n" + paragraph if overlap_text else paragraph
+                if self.count_tokens(potential_new_chunk) > target_tokens:
+                    # Skip overlap if it would cause the new chunk to exceed limits
+                    current_chunk = paragraph
+                    chunk_paragraphs = [paragraph]
+                else:
+                    current_chunk = potential_new_chunk
+                    chunk_paragraphs = overlap_paras + [paragraph]
             else:
                 current_chunk = potential_chunk
                 chunk_paragraphs.append(paragraph)
@@ -424,7 +442,7 @@ class TextChunker:
                 continue
             
             # If paragraph is very long, split on sentence boundaries
-            if len(para) > 1000:
+            if len(para) > 1000 or self.count_tokens(para) > self.config.tokens_per_chunk:
                 sentences = re.split(r'[.!?]+\s+', para)
                 current_group = ""
                 
@@ -434,7 +452,8 @@ class TextChunker:
                     
                     potential_group = current_group + ". " + sentence if current_group else sentence
                     
-                    if len(potential_group) > 800 and current_group:
+                    # Use token count for more accurate splitting
+                    if self.count_tokens(potential_group) > self.config.tokens_per_chunk and current_group:
                         result.append(current_group.strip())
                         current_group = sentence
                     else:

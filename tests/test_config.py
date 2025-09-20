@@ -60,7 +60,7 @@ def test_config_to_yaml():
     """Test saving configuration to YAML file."""
     config = Config()
     config.project.name = "Test Export"
-    config.llm.temperature = 0.7
+    config.pipeline.llm.temperature = 0.7
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
         yaml_path = f.name
@@ -73,7 +73,7 @@ def test_config_to_yaml():
             data = yaml.safe_load(f)
         
         assert data['project']['name'] == "Test Export"
-        assert data['llm']['temperature'] == 0.7
+        assert data['pipeline']['llm']['temperature'] == 0.7
         
     finally:
         os.unlink(yaml_path)

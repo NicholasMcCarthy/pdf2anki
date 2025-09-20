@@ -19,12 +19,15 @@ def test_generate_plan_mode_no_documents_file():
         
         # Should exit with error when documents.yaml doesn't exist
         with patch('pdf2anki.cli.console') as mock_console:
-            with patch('typer.Exit') as mock_exit:
+            try:
                 app(['generate', '--plan', '--documents', str(documents_file)])
-                
-                # Should print error message about missing documents.yaml
-                mock_console.print.assert_called()
-                mock_exit.assert_called_with(1)
+                assert False, "Expected typer.Exit to be raised"
+            except SystemExit as e:
+                # typer.Exit gets converted to SystemExit
+                assert e.code == 1
+            
+            # Should print error message about missing documents.yaml
+            mock_console.print.assert_called()
 
 
 def test_generate_sample_mode_no_documents_file():
@@ -35,12 +38,15 @@ def test_generate_sample_mode_no_documents_file():
         
         # Should exit with error when documents.yaml doesn't exist
         with patch('pdf2anki.cli.console') as mock_console:
-            with patch('typer.Exit') as mock_exit:
+            try:
                 app(['generate', '--sample', '--documents', str(documents_file)])
-                
-                # Should print error message about missing documents.yaml
-                mock_console.print.assert_called()
-                mock_exit.assert_called_with(1)
+                assert False, "Expected typer.Exit to be raised"
+            except SystemExit as e:
+                # typer.Exit gets converted to SystemExit
+                assert e.code == 1
+            
+            # Should print error message about missing documents.yaml
+            mock_console.print.assert_called()
 
 
 def test_generate_plan_sample_csv_mode():
@@ -56,7 +62,11 @@ def test_generate_plan_sample_csv_mode():
             }.get(nt, [])
             
             # This should work without documents.yaml
-            app(['generate', '--plan-sample-csv'])
+            try:
+                app(['generate', '--plan-sample-csv'])
+            except SystemExit as e:
+                # SystemExit with code 0 means success
+                assert e.code == 0
             
             # Should have called console.print to show schema info
             mock_console.print.assert_called()
