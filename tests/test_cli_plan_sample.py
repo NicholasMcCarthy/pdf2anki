@@ -56,7 +56,11 @@ def test_generate_plan_sample_csv_mode():
             }.get(nt, [])
             
             # This should work without documents.yaml
-            app(['generate', '--plan-sample-csv'])
+            try:
+                app(['generate', '--plan-sample-csv'])
+            except SystemExit as e:
+                # SystemExit with code 0 means success
+                assert e.code == 0
             
             # Should have called console.print to show schema info
             mock_console.print.assert_called()

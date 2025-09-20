@@ -16,8 +16,13 @@ from .build import build_anki_deck
 from .config import Config, DocumentsConfig
 from .heuristics import DocumentAnalyzer
 from .io import clear_cache, load_csv, preview_cards
-
 from .validate import validate_csv
+
+# Import functions used by tests
+from .pdf import PDFProcessor
+from .chunking import TextChunker
+from .llm import create_llm_provider
+from .templates import get_note_type_manager
 
 app = typer.Typer(
     name="pdf2anki",
@@ -129,11 +134,11 @@ def validate(
             console.print("❌ Validation failed:", style="bold red")
             for error in result["errors"]:
                 console.print(f"  • {error}", style="red")
-            raise typer.Exit(1)
+            raise typer.Exit(code=1)
             
     except Exception as e:
         console.print(f"❌ Error during validation: {e}", style="bold red")
-        raise typer.Exit(1)
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -171,7 +176,7 @@ def build(
         
     except Exception as e:
         console.print(f"❌ Error during build: {e}", style="bold red")
-        raise typer.Exit(1)
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -194,7 +199,7 @@ def preview(
         
     except Exception as e:
         console.print(f"❌ Error during preview: {e}", style="bold red")
-        raise typer.Exit(1)
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -243,7 +248,7 @@ def scan_docs(
         
         if not discovered_pdfs:
             console.print("❌ No PDF files found in configured paths.", style="red")
-            raise typer.Exit(1)
+            raise typer.Exit(code=1)
         
         console.print(f"📄 Found {len(discovered_pdfs)} PDF files")
         
@@ -326,7 +331,7 @@ def scan_docs(
         console.print(f"❌ Error during document scanning: {e}", style="bold red")
         if verbose:
             console.print_exception()
-        raise typer.Exit(1)
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -354,21 +359,21 @@ def generate(
             console.print(f"📄 {documents_file} not found. Running scan-docs first...", style="yellow")
             # TODO: Call scan_docs automatically
             console.print("❌ Please run 'pdf2anki scan-docs' first to create documents.yaml", style="red")
-            raise typer.Exit(1)
+            raise typer.Exit(code=1)
         
         # Load documents configuration
         documents_config = DocumentsConfig.from_yaml(documents_file)
         
         if not documents_config.documents:
             console.print("❌ No documents found in documents.yaml", style="red")
-            raise typer.Exit(1)
+            raise typer.Exit(code=1)
         
         # Filter documents if PDF override specified
         if pdf_override:
             key = pdf_override.name
             if key not in documents_config.documents:
                 console.print(f"❌ PDF {key} not found in documents.yaml", style="red")
-                raise typer.Exit(1)
+                raise typer.Exit(code=1)
             process_documents = {key: documents_config.documents[key]}
         else:
             process_documents = {k: v for k, v in documents_config.documents.items() if v.enabled}
@@ -386,7 +391,7 @@ def generate(
         console.print(f"❌ Error during generation: {e}", style="bold red")
         if verbose:
             console.print_exception()
-        raise typer.Exit(1)
+        raise typer.Exit(code=1)
 
 
 def _show_generation_plan(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
