@@ -97,9 +97,9 @@ hallucination:
 # Review step (optional)
 review:
   enabled: false  # Disable by default as it doubles token usage
-  min_score: 7.0
-  allow_edits: true
-  template_version: "1.0"
+  min_score: 7.0  # Minimum score threshold for cards to pass review
+  allow_edits: true  # Allow the reviewer to improve card content
+  template_version: "1.0"  # Version of the reviewer template to use
 
 # Tagging configuration
 tags:

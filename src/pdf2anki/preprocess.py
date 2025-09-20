@@ -310,7 +310,7 @@ def process_single_pdf(
     # Apply review step if enabled
     if config.review.enabled:
         telemetry.start_phase(f"review_{pdf_path.name}")
-        all_cards = apply_review_step(all_cards, llm_provider, prompt_manager, config.review)
+        all_cards = apply_review_step(all_cards, llm_provider, prompt_manager, config.review, telemetry)
         telemetry.end_phase()
     
     logger.info(f"Generated {len(all_cards)} cards from {pdf_path}")
@@ -372,13 +372,120 @@ def apply_hallucination_checks(
     return valid_cards
 
 
-def apply_review_step(cards, llm_provider, prompt_manager, review_config) -> List[FlashcardData]:
+def apply_review_step(cards, llm_provider, prompt_manager, review_config, telemetry) -> List[FlashcardData]:
     """Apply LLM review step to improve card quality."""
     
     logger.info(f"Applying review step to {len(cards)} cards")
     
-    # TODO: Implement LLM-based review
-    # For now, just return cards as-is
-    logger.debug("Review step not fully implemented yet")
+    if not review_config.enabled:
+        logger.debug("Review step is disabled, skipping")
+        return cards
     
-    return cards
+    # Check if reviewer template exists
+    try:
+        available_templates = prompt_manager.list_templates()
+        if "reviewer_special.j2" not in available_templates:
+            logger.error("Reviewer template 'reviewer_special.j2' not found, skipping review")
+            return cards
+    except Exception as e:
+        logger.error(f"Failed to check reviewer template: {e}")
+        return cards
+    
+    reviewed_cards = []
+    cards_dropped = 0
+    cards_edited = 0
+    
+    for card in cards:
+        try:
+            # Prepare context for the reviewer
+            context = {
+                "pdf_title": getattr(card, 'source_pdf', 'Unknown'),
+                "page_start": getattr(card, 'page_start', 'Unknown'),
+                "page_end": getattr(card, 'page_end', 'Unknown'),
+                "strategy": getattr(card, 'strategy', 'Unknown'),
+                "section": getattr(card, 'section', None)
+            }
+            
+            # Convert FlashcardData to dict for review
+            card_data = {
+                'id': card.id,
+                'front': card.front,
+                'back': card.back,
+                'note_type': getattr(card, 'note_type', 'basic'),
+                'tags': getattr(card, 'tags', [])
+            }
+            
+            # Special handling for cloze cards
+            if hasattr(card, 'cloze_text'):
+                card_data['cloze_text'] = card.cloze_text
+                card_data['front'] = card.cloze_text
+            
+            # Get review assessment
+            review = llm_provider.review_card(
+                card_data=card_data,
+                context=context,
+                prompt_manager=prompt_manager,
+                template_name="reviewer_special.j2"
+            )
+            
+            # Check if card meets minimum score threshold
+            if review["score"] < review_config.min_score:
+                logger.debug(f"Card {card.id} dropped: score {review['score']:.2f} < {review_config.min_score}")
+                cards_dropped += 1
+                continue
+            
+            # Apply edits if provided and allowed
+            if review_config.allow_edits and "edited" in review and review["edited"]:
+                edited = review["edited"]
+                if "front" in edited:
+                    card.front = edited["front"]
+                    logger.debug(f"Card {card.id} front edited")
+                    
+                if "back" in edited:
+                    card.back = edited["back"]
+                    logger.debug(f"Card {card.id} back edited")
+                    
+                # Handle cloze cards
+                if hasattr(card, 'cloze_text') and "front" in edited:
+                    card.cloze_text = edited["front"]
+                
+                cards_edited += 1
+            
+            # Add review metadata to card
+            if hasattr(card, 'metadata'):
+                card.metadata.update({
+                    'review_score': review["score"],
+                    'review_issues': review.get("issues", []),
+                    'review_edited': bool(review_config.allow_edits and "edited" in review and review["edited"])
+                })
+            else:
+                # Create metadata dict if it doesn't exist
+                card.metadata = {
+                    'review_score': review["score"],
+                    'review_issues': review.get("issues", []),
+                    'review_edited': bool(review_config.allow_edits and "edited" in review and review["edited"])
+                }
+            
+            reviewed_cards.append(card)
+            
+        except Exception as e:
+            logger.error(f"Error reviewing card {getattr(card, 'id', 'unknown')}: {e}")
+            # Keep the card on error rather than dropping it
+            reviewed_cards.append(card)
+    
+    logger.info(f"Review complete: {len(reviewed_cards)} cards kept, {cards_dropped} dropped, {cards_edited} edited")
+    
+    # Record telemetry metrics
+    telemetry.record_reviewer_metrics(
+        cards_reviewed=len(cards),
+        cards_dropped=cards_dropped,
+        cards_edited=cards_edited,
+        llm_stats=llm_provider.get_stats(),
+        config={
+            "min_score": review_config.min_score,
+            "template_version": review_config.template_version,
+            "allow_edits": review_config.allow_edits
+        }
+    )
+    
+    return reviewed_cards

@@ -152,6 +152,68 @@ class LLMProvider:
             "api_calls": self.api_calls,
             "cache_hit_rate": self.cache_hits / max(1, self.api_calls),
         }
+    
+    def review_card(self, card_data: Dict[str, Any], context: Dict[str, Any], prompt_manager, template_name: str = "reviewer_special.j2") -> Dict[str, Any]:
+        """Review a single flashcard and return assessment with strict JSON output.
+        
+        Args:
+            card_data: The flashcard data to review
+            context: Source context (pdf_title, page_start, page_end, strategy, section)
+            prompt_manager: The prompt manager instance
+            template_name: Name of the template to use for review
+            
+        Returns:
+            Dict containing: id, score, issues, edited (optional)
+        """
+        import json
+        
+        # Render the review prompt using the prompt manager
+        try:
+            prompt = prompt_manager.render_template(template_name, 
+                                                  card_data=card_data,
+                                                  **context)
+        except Exception as e:
+            logger.error(f"Failed to render review template: {e}")
+            return {
+                "id": card_data.get("id", "unknown"),
+                "score": 5.0,
+                "issues": [f"Template rendering failed: {str(e)}"],
+                "edited": None
+            }
+        
+        # Generate review with JSON mode
+        response = self.generate(
+            prompt=prompt,
+            json_mode=True,
+            max_retries=3
+        )
+        
+        try:
+            # Parse the JSON response
+            review_data = json.loads(response.content)
+            
+            # Validate required fields
+            if "id" not in review_data:
+                review_data["id"] = card_data.get("id", "unknown")
+            if "score" not in review_data:
+                raise ValueError("Review response missing required 'score' field")
+            if "issues" not in review_data:
+                review_data["issues"] = []
+                
+            # Ensure score is numeric
+            review_data["score"] = float(review_data["score"])
+            
+            return review_data
+            
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse review response, using fallback: {e}")
+            # Return a fallback review indicating parsing issues
+            return {
+                "id": card_data.get("id", "unknown"),
+                "score": 5.0,  # Below threshold to be safe
+                "issues": [f"Review parsing failed: {str(e)}"],
+                "edited": None
+            }
 
 
 class ModelRegistry:

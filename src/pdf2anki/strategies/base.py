@@ -19,6 +19,7 @@ class FlashcardData(BaseModel):
     """Base flashcard data structure."""
     
     # Core fields (all cards have these)
+    id: Optional[str] = None  # Added for reviewer functionality
     note_type: str
     page_citation: str
     core_concept: str
@@ -42,6 +43,7 @@ class FlashcardData(BaseModel):
     strategy: str = ""
     template_version: str = "1.0"
     original_text: Optional[str] = None
+    metadata: Dict[str, Any] = {}  # Added for reviewer functionality
     
     @validator("difficulty")
     def validate_difficulty(cls, v):
