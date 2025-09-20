@@ -22,7 +22,7 @@ from .validate import validate_csv
 from .pdf import PDFProcessor
 from .chunking import TextChunker
 from .llm import create_llm_provider
-from .templates import get_note_type_manager
+from .templates import get_note_type_manager, NoteTypeManager, PromptManager
 
 app = typer.Typer(
     name="pdf2anki",
@@ -30,6 +30,33 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+
+def _get_template_managers(current_dir: Path = Path.cwd()):
+    """Get template managers, using init directories if they exist."""
+    init_prompts_dir = current_dir / "prompts"
+    init_notes_dir = current_dir / "notes"
+    
+    # Check if we're in an initialized directory with custom templates
+    if init_prompts_dir.exists() and init_notes_dir.exists():
+        console.print(f"📁 Using templates from init directory: {current_dir}", style="yellow")
+        
+        # Create custom managers using init directories
+        from .prompts import create_prompt_manager
+        prompt_manager = create_prompt_manager(init_prompts_dir)
+        note_type_manager = NoteTypeManager(init_notes_dir)
+        template_prompt_manager = PromptManager(init_prompts_dir)
+        
+        return prompt_manager, note_type_manager, template_prompt_manager
+    else:
+        # Use default managers
+        from .prompts import create_prompt_manager
+        prompt_manager = create_prompt_manager()
+        note_type_manager = get_note_type_manager()
+        template_prompt_manager = PromptManager()
+        
+        return prompt_manager, note_type_manager, template_prompt_manager
+
 
 @app.command()
 def init(
@@ -51,7 +78,7 @@ def init(
         directory.mkdir(parents=True, exist_ok=True)
         console.print(f"📁 Created directory: {directory}")
     
-    # Copy example config
+    # Copy example config to examples directory
     config_example_path = target_dir / "examples" / "config.example.yaml"
     if config_example_path.exists() and not force:
         console.print(f"⚠️  {config_example_path} already exists. Use --force to overwrite.")
@@ -61,9 +88,20 @@ def init(
         default_config.to_yaml(config_example_path)
         console.print(f"📝 Created example configuration: {config_example_path}")
     
-    # Copy default prompts
+    # Copy example config to samples directory as well (as requested in requirements)
+    samples_config_path = target_dir / "samples" / "config.example.yaml"
+    if samples_config_path.exists() and not force:
+        console.print(f"⚠️  {samples_config_path} already exists. Use --force to overwrite.")
+    else:
+        # Create example config in samples as well
+        default_config = Config()
+        default_config.to_yaml(samples_config_path)
+        console.print(f"📝 Created example configuration: {samples_config_path}")
+    
+    # Copy default prompts (.j2 templates and .yaml configs)
     package_prompts_dir = Path(__file__).parent.parent.parent / "prompts"
     if package_prompts_dir.exists():
+        # Copy .j2 template files
         for prompt_file in package_prompts_dir.glob("*.j2"):
             target_file = prompts_dir / prompt_file.name
             if target_file.exists() and not force:
@@ -71,6 +109,15 @@ def init(
             else:
                 shutil.copy2(prompt_file, target_file)
                 console.print(f"📄 Copied prompt template: {target_file}")
+        
+        # Copy .yaml configuration files
+        for prompt_file in package_prompts_dir.glob("*.yaml"):
+            target_file = prompts_dir / prompt_file.name
+            if target_file.exists() and not force:
+                console.print(f"⚠️  {target_file} already exists. Use --force to overwrite.")
+            else:
+                shutil.copy2(prompt_file, target_file)
+                console.print(f"📄 Copied prompt config: {target_file}")
     
     # Copy note type definitions
     package_notes_dir = Path(__file__).parent.parent.parent / "notes"
@@ -354,7 +401,15 @@ def generate(
         else:
             base_config = Config()
         
-        # Check if documents.yaml exists
+        # Get template managers (using init directories if available)
+        prompt_manager, note_type_manager, template_prompt_manager = _get_template_managers()
+        
+        # Handle plan-sample-csv first as it doesn't need documents.yaml
+        if plan_sample_csv:
+            _generate_sample_csv_schema(base_config, note_type_manager)
+            return
+        
+        # Check if documents.yaml exists for other operations
         if not documents_file.exists():
             console.print(f"📄 {documents_file} not found. Running scan-docs first...", style="yellow")
             # TODO: Call scan_docs automatically
@@ -379,13 +434,11 @@ def generate(
             process_documents = {k: v for k, v in documents_config.documents.items() if v.enabled}
         
         if plan:
-            _show_generation_plan(process_documents, base_config, documents_config)
+            _show_generation_plan(process_documents, base_config, documents_config, prompt_manager)
         elif sample:
-            _generate_samples(process_documents, base_config, documents_config)
-        elif plan_sample_csv:
-            _generate_sample_csv_schema(base_config)
+            _generate_samples(process_documents, base_config, documents_config, prompt_manager)
         else:
-            _run_full_generation(process_documents, base_config, documents_config, verbose)
+            _run_full_generation(process_documents, base_config, documents_config, verbose, prompt_manager, note_type_manager)
         
     except Exception as e:
         console.print(f"❌ Error during generation: {e}", style="bold red")
@@ -394,7 +447,7 @@ def generate(
         raise typer.Exit(code=1)
 
 
-def _show_generation_plan(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
+def _show_generation_plan(documents: dict, base_config: Config, documents_config: DocumentsConfig, prompt_manager=None) -> None:
     """Show generation plan for documents."""
     console.print("📋 Generation Plan", style="bold green")
     
@@ -433,11 +486,13 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
             # Load and chunk the first few pages to get first chunk
             from .pdf import PDFProcessor
             from .chunking import TextChunker
-            from .prompts import create_prompt_manager
+            
+            if prompt_manager is None:
+                from .prompts import create_prompt_manager
+                prompt_manager = create_prompt_manager()
             
             pdf_processor = PDFProcessor()
             text_chunker = TextChunker(effective_config.ingestion.chunking)
-            prompt_manager = create_prompt_manager()
             
             # Extract text from first few pages
             pdf_text = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
@@ -476,7 +531,7 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
             console.print("  🔧 [Strategy-specific prompt template would be shown]")
 
 
-def _generate_samples(documents: dict, base_config: Config, documents_config: DocumentsConfig) -> None:
+def _generate_samples(documents: dict, base_config: Config, documents_config: DocumentsConfig, prompt_manager=None) -> None:
     """Generate sample cards from first chunk of each document."""
     console.print("🔬 Generating samples from first chunk of each document...", style="bold green")
     
@@ -563,7 +618,7 @@ def _generate_samples(documents: dict, base_config: Config, documents_config: Do
             console.print("  🔧 [Mock sample generation would be shown here]")
 
 
-def _generate_sample_csv_schema(base_config: Config) -> None:
+def _generate_sample_csv_schema(base_config: Config, note_type_manager=None) -> None:
     """Generate sample CSV schema from note type templates."""
     console.print("📊 Generating sample CSV schema...", style="bold green")
     
@@ -571,8 +626,10 @@ def _generate_sample_csv_schema(base_config: Config) -> None:
     import csv
     from io import StringIO
     
-    note_manager = get_note_type_manager()
-    all_note_types = note_manager.list_note_types()
+    if note_type_manager is None:
+        note_type_manager = get_note_type_manager()
+    
+    all_note_types = note_type_manager.list_note_types()
     
     if not all_note_types:
         console.print("❌ No note types found. Please check notes/ directory.", style="red")
@@ -583,7 +640,7 @@ def _generate_sample_csv_schema(base_config: Config) -> None:
     note_type_fields = {}
     
     for note_type in all_note_types:
-        fields = note_manager.get_csv_fields(note_type)
+        fields = note_type_manager.get_csv_fields(note_type)
         note_type_fields[note_type] = fields
         all_fields.update(fields)
     
@@ -660,7 +717,7 @@ def _generate_sample_csv_schema(base_config: Config) -> None:
     console.print(preview_table)
 
 
-def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool) -> None:
+def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:
     """Run full generation process."""
     console.print("⚡ Running full generation...", style="bold green")
     
