@@ -1,7 +1,7 @@
 # Cloze Definitions Strategy Prompt Template
 # Uses external Jinja template file
 
-name: "cloze_generation"
+name: "cloze_definitions"
 version: "2.0"
 description: "Generate cloze deletion cards from definitions and key concepts"
 note_type: "cloze"
