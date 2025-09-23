@@ -11,7 +11,7 @@ from langchain.globals import set_llm_cache
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-from .config import LLMConfig
+from .config import Config
 
 logger = logging.getLogger(__name__)
 

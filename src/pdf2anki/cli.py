@@ -73,8 +73,9 @@ def init(
     notes_dir = target_dir / "notes"
     samples_dir = target_dir / "samples"
     scripts_dir = target_dir / "scripts"
-    
-    for directory in [workspace_dir, prompts_dir, examples_dir, notes_dir, samples_dir, scripts_dir]:
+    pdfs_dir = target_dir / "pdfs"
+
+    for directory in [workspace_dir, prompts_dir, examples_dir, notes_dir, samples_dir, scripts_dir, pdfs_dir]:
         directory.mkdir(parents=True, exist_ok=True)
         console.print(f"📁 Created directory: {directory}")
     
@@ -87,17 +88,7 @@ def init(
         default_config = Config()
         default_config.to_yaml(config_example_path)
         console.print(f"📝 Created example configuration: {config_example_path}")
-    
-    # Copy example config to samples directory as well (as requested in requirements)
-    samples_config_path = target_dir / "samples" / "config.example.yaml"
-    if samples_config_path.exists() and not force:
-        console.print(f"⚠️  {samples_config_path} already exists. Use --force to overwrite.")
-    else:
-        # Create example config in samples as well
-        default_config = Config()
-        default_config.to_yaml(samples_config_path)
-        console.print(f"📝 Created example configuration: {samples_config_path}")
-    
+
     # Copy default prompts (.j2 templates and .yaml configs)
     package_prompts_dir = Path(__file__).parent.parent.parent / "prompts"
     if package_prompts_dir.exists():
@@ -129,18 +120,7 @@ def init(
             else:
                 shutil.copy2(note_file, target_file)
                 console.print(f"📝 Copied note type: {target_file}")
-    
-    # Copy sample generation script
-    package_scripts_dir = Path(__file__).parent.parent.parent / "scripts"
-    if package_scripts_dir.exists():
-        for script_file in package_scripts_dir.glob("*.py"):
-            target_file = scripts_dir / script_file.name
-            if target_file.exists() and not force:
-                console.print(f"⚠️  {target_file} already exists. Use --force to overwrite.")
-            else:
-                shutil.copy2(script_file, target_file)
-                console.print(f"🔧 Copied script: {target_file}")
-    
+
     console.print(Panel.fit(
         "✅ Initialization complete!\n\n"
         "Next steps:\n"
@@ -495,10 +475,10 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
             text_chunker = TextChunker(effective_config.ingestion.chunking)
             
             # Extract text from first few pages
-            pdf_text = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
+            pdf_content = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
             
             # Get first chunk
-            chunks = text_chunker.chunk_text(pdf_text, start_page=1)
+            chunks = text_chunker.chunk_document(pdf_content) #, start_page=1)
             if chunks:
                 first_chunk = chunks[0]
                 
@@ -558,7 +538,7 @@ def _generate_samples(documents: dict, base_config: Config, documents_config: Do
             pdf_text = pdf_processor.extract_text(doc_config.file_path, max_pages=3)
             
             # Get first chunk
-            chunks = text_chunker.chunk_text(pdf_text, start_page=1)
+            chunks = text_chunker.chunk_document(pdf_text)
             if not chunks:
                 console.print("  ⚠️  No chunks generated (PDF may be empty or unreadable)")
                 continue
@@ -582,7 +562,7 @@ def _generate_samples(documents: dict, base_config: Config, documents_config: Do
                 {
                     "id": f"sample_{doc_key}_001",
                     "note_type": "basic",
-                    "front": f"Sample question from {Path(doc_config.file_path).stem}",
+                    "front": f"Sample question from {Path(doc_config.file_path)}",
                     "back": f"Sample answer based on first chunk content",
                     "source_pdf": Path(doc_config.file_path).name,
                     "page_start": first_chunk.start_page,

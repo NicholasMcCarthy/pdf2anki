@@ -1,133 +1,188 @@
-"""Configuration management using Pydantic."""
+# config.py
+"""
+Lightweight, permissive config using dataclasses (no Pydantic).
+- Sensible defaults
+- Tolerant YAML loading (unknown keys ignored)
+- Strategies are a LIST in base config
+- DocumentConfig can override/compose ingestion + strategies
+"""
+
+from __future__ import annotations
 
 import os
-from enum import Enum
+from dataclasses import dataclass, field, fields, asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-
+from typing import Any, Dict, List, Optional, Union, get_origin, get_args
+import copy
 import yaml
-from pydantic import BaseModel, Field, validator
-from pydantic_settings import BaseSettings
 
 
-class ProviderType(str, Enum):
-    """Supported LLM providers."""
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
+# --------------------------- helpers ---------------------------------
+
+def _resolve_env_value(v: Optional[str]) -> Optional[str]:
+    """Allow ${ENV_VAR} in YAML to resolve from environment."""
+    if isinstance(v, str) and v.startswith("${") and v.endswith("}"):
+        return os.getenv(v[2:-1])
+    return v
 
 
-class ChunkingMode(str, Enum):
-    """PDF chunking strategies."""
-    PAGES = "pages"
-    SECTIONS = "sections"
-    PARAGRAPHS = "paragraphs"
-    SMART = "smart"
-    FIGURES = "figures"  # New: Extract and chunk based on figures
-    HIGHLIGHTS = "highlights"  # New: Extract and chunk based on highlights
-    ENTIRE = "entire"  # New: Prefer single chunk, auto-split if needed
+def _deep_merge(a: Any, b: Any) -> Any:
+    """
+    Recursively merge b into a and return a new object.
+    - dicts: deep merge
+    - lists: override (b wins) – avoids accidental duplication
+    - scalars: override (b wins)
+    """
+    if isinstance(a, dict) and isinstance(b, dict):
+        out = dict(a)
+        for k, v in b.items():
+            out[k] = _deep_merge(out[k], v) if k in out else copy.deepcopy(v)
+        return out
+    # For lists and scalars, prefer b if provided (explicit override)
+    return copy.deepcopy(b)
 
 
-class DeckStructure(str, Enum):
-    """Anki deck organization strategies."""
-    FLAT = "flat"
-    BY_CHAPTER = "by_chapter"
-    BY_THEME = "by_theme"
-    PREDEFINED = "predefined"
+def _select_dict_keys(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+    return {k: d[k] for k in keys if k in d}
 
 
-class IdStrategy(str, Enum):
-    """ID generation strategies."""
-    CONTENT_HASH = "content_hash"
-    PERSISTENT = "persistent"
+def _dataclass_from_dict(dc_type, data: Dict[str, Any]):
+    """Create dataclass instance from dict, ignoring unknown keys, recursing into nested dataclasses."""
+    if not is_dataclass(dc_type):
+        return data  # not a dataclass type
+    kwargs = {}
+    for f in fields(dc_type):
+        key = f.name
+        if key not in data:
+            continue
+        raw = data[key]
+        # handle Optional[T], List[T], Dict[K,V], nested dataclasses
+        origin = get_origin(f.type)
+        args = get_args(f.type)
+
+        if is_dataclass(f.type) and isinstance(raw, dict):
+            kwargs[key] = _dataclass_from_dict(f.type, raw)
+
+        elif origin is Union and len(args) == 2 and type(None) in args:
+            inner = args[0] if args[1] is type(None) else args[1]
+            if is_dataclass(inner) and isinstance(raw, dict):
+                kwargs[key] = _dataclass_from_dict(inner, raw)
+            else:
+                kwargs[key] = raw
+
+        elif origin in (list, List) and isinstance(raw, list):
+            inner = args[0] if args else Any
+            if is_dataclass(inner):
+                kwargs[key] = [_dataclass_from_dict(inner, x) if isinstance(x, dict) else x for x in raw]
+            else:
+                kwargs[key] = raw
+
+        elif origin in (dict, Dict) and isinstance(raw, dict):
+            k_t, v_t = (args + (Any, Any))[:2]
+            if is_dataclass(v_t):
+                kwargs[key] = {k: _dataclass_from_dict(v_t, v) if isinstance(v, dict) else v for k, v in raw.items()}
+            else:
+                kwargs[key] = raw
+        else:
+            kwargs[key] = raw
+    return dc_type(**kwargs)
 
 
-class DeduplicationPolicy(str, Enum):
-    """Deduplication merge policies."""
-    OR = "or"
-    AND = "and"
+def _coerce_to_dc(dc_obj, patch: Dict[str, Any]):
+    """Merge dict patch into dataclass by converting to dict, deep-merge, then rebuild."""
+    merged = _deep_merge(asdict(dc_obj), patch or {})
+    return _dataclass_from_dict(type(dc_obj), merged)
 
 
-class DocumentType(str, Enum):
-    """Detected document types."""
-    RESEARCH_PAPER = "research_paper"
-    TEXTBOOK = "textbook"
-    UNKNOWN = "unknown"
+def _as_plain(o: Any) -> Any:
+    """asdict() with Path/env/enum-safe scalars for YAML dump."""
+    if is_dataclass(o):
+        return {k: _as_plain(v) for k, v in asdict(o).items()}
+    if isinstance(o, dict):
+        return {k: _as_plain(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_as_plain(v) for v in o]
+    if isinstance(o, Path):
+        return str(o)
+    return o
 
 
-class ProjectConfig(BaseModel):
-    """Project-level configuration."""
+def _unique_by_name(strategies: List["Strategy"]) -> List["Strategy"]:
+    """Keep last occurrence by name to allow overrides to win."""
+    seen = {}
+    for s in strategies:
+        if s.name:  # safe guard
+            seen[s.name] = s
+    return list(seen.values())
+
+
+# --------------------------- dataclasses ------------------------------
+
+@dataclass
+class Project:
     name: str = "pdf2anki"
     version: str = "1.0"
     author: Optional[str] = None
     description: Optional[str] = None
 
 
-class InputConfig(BaseModel):
-    """Input PDF configuration."""
-    paths: List[Union[str, Path]] = Field(default_factory=list)
-    patterns: List[str] = Field(default_factory=lambda: ["*.pdf"])
+@dataclass
+class Inputs:
+    paths: List[Union[str, Path]] = field(default_factory=lambda: ["pdfs/"])
+    patterns: List[str] = field(default_factory=lambda: ["*.pdf"])
     recursive: bool = True
 
 
-class ChunkingConfig(BaseModel):
-    """Text chunking configuration."""
-    mode: ChunkingMode = ChunkingMode.SMART
+@dataclass
+class Chunking:
+    mode: str = "smart"                 # pages|sections|paragraphs|smart|figures|highlights|entire
     tokens_per_chunk: int = 2000
     overlap_tokens: int = 200
     respect_page_bounds: bool = True
     min_chunk_tokens: int = 100
     max_chunk_tokens: int = 4000
-    # Entire mode specific settings
-    enable_trimming: bool = True  # Enable/disable terminal section trimming
-    token_budget: int = 8000  # Max tokens before auto-splitting in entire mode
+    enable_trimming: bool = True        # entire-mode helpers
+    token_budget: int = 8000
 
 
-class IngestionConfig(BaseModel):
-    """PDF ingestion configuration."""
+@dataclass
+class Ingestion:
     mode: str = "extract_text"
-    chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    chunking: Chunking = field(default_factory=Chunking)
     extract_images: bool = True
     extract_tables: bool = False
     ocr_fallback: bool = False
 
 
-class LLMConfig(BaseModel):
-    """LLM provider configuration."""
-    provider: ProviderType = ProviderType.OPENAI
+@dataclass
+class LLM:
+    provider: str = "openai"
     model: str = "gpt-4-1106-preview"
     temperature: float = 0.0
     seed: Optional[int] = None
     max_tokens: Optional[int] = None
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None  # supports ${ENV_VAR}
     base_url: Optional[str] = None
     timeout: int = 120
     max_retries: int = 3
 
-    @validator("api_key", pre=True)
-    def resolve_api_key(cls, v):
-        if v and v.startswith("${") and v.endswith("}"):
-            env_var = v[2:-1]
-            return os.getenv(env_var)
-        return v
+    def resolve_env(self) -> None:
+        self.api_key = _resolve_env_value(self.api_key)
 
 
-class StrategyConfig(BaseModel):
-    """Individual strategy configuration."""
+@dataclass
+class Strategy:
+    """Single generation strategy (list item)."""
+    name: str = "basic_key_points"
+    prompt: str = "key_points"
+    note: str = "basic"
     enabled: bool = True
-    template_version: str = "1.0"
-    params: Dict[str, Any] = Field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
     min_score: Optional[float] = None
 
 
-class StrategiesConfig(BaseModel):
-    """All generation strategies configuration."""
-    key_points: StrategyConfig = Field(default_factory=StrategyConfig)
-    cloze_definitions: StrategyConfig = Field(default_factory=StrategyConfig)
-    figure_based: StrategyConfig = Field(default_factory=StrategyConfig)
-
-
-class RAGConfig(BaseModel):
-    """RAG-lite configuration."""
+@dataclass
+class RAG:
     enabled: bool = False
     provider: str = "faiss"
     embedding_model: str = "text-embedding-3-large"
@@ -135,64 +190,64 @@ class RAGConfig(BaseModel):
     index_path: Optional[str] = None
 
 
-class DeduplicationConfig(BaseModel):
-    """Deduplication configuration."""
+@dataclass
+class Deduplication:
     enabled: bool = True
     fuzzy_threshold: float = 0.85
     embedding_threshold: float = 0.9
-    policy: DeduplicationPolicy = DeduplicationPolicy.OR
+    policy: str = "or"      # or|and
     scope_within_run: bool = True
     scope_persistent: bool = False
     index_path: Optional[str] = None
 
 
-class HallucinationConfig(BaseModel):
-    """Hallucination mitigation configuration."""
+@dataclass
+class Hallucination:
     require_citations: bool = True
     verify_quotes: bool = True
     drop_on_failure: bool = True
 
 
-class ReviewConfig(BaseModel):
-    """Review step configuration."""
+@dataclass
+class Review:
     enabled: bool = False
     min_score: float = 7.0
     allow_edits: bool = True
     template_version: str = "1.0"
 
 
-class TagsConfig(BaseModel):
-    """Tagging configuration."""
-    default_tags: List[str] = Field(default_factory=list)
+@dataclass
+class Tags:
+    default_tags: List[str] = field(default_factory=list)
     auto_generate: bool = True
     include_source: bool = True
     include_strategy: bool = True
 
 
-class TaxonomyConfig(BaseModel):
-    """Content taxonomy configuration."""
+@dataclass
+class Taxonomy:
     auto_detect: bool = True
     hierarchical: bool = True
     max_depth: int = 3
 
 
-class IdsConfig(BaseModel):
-    """ID generation configuration."""
-    strategy: IdStrategy = IdStrategy.CONTENT_HASH
+@dataclass
+class Ids:
+    strategy: str = "content_hash"   # content_hash|persistent
     salt: str = "pdf2anki"
 
 
-class AnkiConfig(BaseModel):
-    """Anki deck configuration."""
+@dataclass
+class Anki:
     deck_name: str = "PDF2Anki"
     deck_id: Optional[int] = None
-    deck_structure: DeckStructure = DeckStructure.FLAT
-    note_types: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    deck_structure: str = "flat"     # flat|by_chapter|by_theme|predefined
+    note_types: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     preserve_latex: bool = True
 
 
-class OutputConfig(BaseModel):
-    """Output paths configuration."""
+@dataclass
+class Output:
     workspace: Path = Path("workspace")
     csv_path: Path = Path("workspace/cards.csv")
     media_path: Path = Path("workspace/media")
@@ -200,8 +255,8 @@ class OutputConfig(BaseModel):
     manifest_path: Path = Path("workspace/manifest.json")
 
 
-class TelemetryConfig(BaseModel):
-    """Telemetry configuration."""
+@dataclass
+class Telemetry:
     enabled: bool = True
     track_tokens: bool = True
     track_costs: bool = True
@@ -209,278 +264,239 @@ class TelemetryConfig(BaseModel):
     track_cache_hits: bool = True
 
 
-class PipelineConfig(BaseModel):
-    """Pipeline execution configuration."""
-    ingestion: IngestionConfig = Field(default_factory=IngestionConfig)
-    llm: LLMConfig = Field(default_factory=LLMConfig)
-    rag: RAGConfig = Field(default_factory=RAGConfig)
-    deduplication: DeduplicationConfig = Field(default_factory=DeduplicationConfig)
-    hallucination: HallucinationConfig = Field(default_factory=HallucinationConfig)
-    review: ReviewConfig = Field(default_factory=ReviewConfig)
-    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+@dataclass
+class Pipeline:
+    ingestion: Ingestion = field(default_factory=Ingestion)
+    llm: LLM = field(default_factory=LLM)
+    rag: RAG = field(default_factory=RAG)
+    deduplication: Deduplication = field(default_factory=Deduplication)
+    hallucination: Hallucination = field(default_factory=Hallucination)
+    review: Review = field(default_factory=Review)
+    telemetry: Telemetry = field(default_factory=Telemetry)
 
 
-class GenerateConfig(BaseModel):
-    """Generation-specific configuration."""
-    strategies: StrategiesConfig = Field(default_factory=StrategiesConfig)
-    tags: TagsConfig = Field(default_factory=TagsConfig)
-    taxonomy: TaxonomyConfig = Field(default_factory=TaxonomyConfig)
-    ids: IdsConfig = Field(default_factory=IdsConfig)
+@dataclass
+class Generate:
+    strategies: List[Strategy] = field(default_factory=lambda: [Strategy()])
+    tags: Tags = field(default_factory=Tags)
+    taxonomy: Taxonomy = field(default_factory=Taxonomy)
+    ids: Ids = field(default_factory=Ids)
     language: str = "en"
-    anki: AnkiConfig = Field(default_factory=AnkiConfig)
-    output: OutputConfig = Field(default_factory=OutputConfig)
+    anki: Anki = field(default_factory=Anki)
+    output: Output = field(default_factory=Output)
 
 
-class DocumentMetadata(BaseModel):
-    """Metadata extracted from PDF document."""
-    page_count: int
+@dataclass
+class Config:
+    """Primary config (permissive)."""
+    project: Project = field(default_factory=Project)
+    inputs: Inputs = field(default_factory=Inputs)
+    pipeline: Pipeline = field(default_factory=Pipeline)
+    generate: Generate = field(default_factory=Generate)
+
+    # ---------- I/O ----------
+    @classmethod
+    def from_yaml(cls, path: Union[str, Path]) -> "Config":
+        if not Path(path).exists():
+            cfg = cls()
+            cfg.pipeline.llm.resolve_env()
+            return cfg
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        # Merge raw YAML into defaults as dicts (permits unknown keys)
+        merged = _deep_merge(_as_plain(cls()), data)
+
+        # Build strongly-typed dataclasses from merged dict (ignore unknowns)
+        cfg = _dataclass_from_dict(cls, merged)
+
+        # Resolve ${ENV} just-in-time
+        cfg.pipeline.llm.resolve_env()
+        return cfg
+
+    def to_yaml(self, path: Union[str, Path]) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(_as_plain(self), f, sort_keys=False, indent=2)
+
+    # ---------- utils ----------
+    def create_workspace(self) -> None:
+        self.generate.output.workspace.mkdir(parents=True, exist_ok=True)
+        self.generate.output.media_path.mkdir(parents=True, exist_ok=True)
+
+    # Legacy convenience accessors (optional)
+    @property
+    def ingestion(self) -> Ingestion: return self.pipeline.ingestion
+    @property
+    def llm(self) -> LLM: return self.pipeline.llm
+    @property
+    def strategies(self) -> List[Strategy]: return self.generate.strategies
+    @property
+    def rag(self) -> RAG: return self.pipeline.rag
+    @property
+    def deduplication(self) -> Deduplication: return self.pipeline.deduplication
+    @property
+    def hallucination(self) -> Hallucination: return self.pipeline.hallucination
+    @property
+    def review(self) -> Review: return self.pipeline.review
+    @property
+    def tags(self) -> Tags: return self.generate.tags
+    @property
+    def taxonomy(self) -> Taxonomy: return self.generate.taxonomy
+    @property
+    def ids(self) -> Ids: return self.generate.ids
+    @property
+    def language(self) -> str: return self.generate.language
+    @property
+    def anki(self) -> Anki: return self.generate.anki
+    @property
+    def output(self) -> Output: return self.generate.output
+
+
+# ----------------------- documents.yaml structures --------------------
+
+@dataclass
+class DocumentMetadata:
+    page_count: int = 0
     toc_present: bool = False
     chapters_detected: bool = False
     abstract_present: bool = False
     references_present: bool = False
     two_column_layout: bool = False
     has_doi: bool = False
-    doc_type: DocumentType = DocumentType.UNKNOWN
     file_size: Optional[int] = None
     created_date: Optional[str] = None
     modified_date: Optional[str] = None
+    doc_type: str = "unknown"  # research_paper|textbook|unknown
 
 
-class DocumentConfig(BaseModel):
-    """Per-document configuration with metadata and overrides."""
+@dataclass
+class DocumentConfig:
     # File information
-    file_path: str
+    file_path: str = ""
     file_hash: Optional[str] = None
-    
-    # Extracted metadata (populated by scan-docs)
+
+    # Extracted metadata
     metadata: Optional[DocumentMetadata] = None
-    
-    # Heuristic defaults (populated by scan-docs)
-    heuristic_chunking: Optional[ChunkingConfig] = None
-    heuristic_strategies: Optional[List[str]] = None
-    
+
+    # Heuristic suggestions (from scan)
+    heuristic_chunking: Optional[Chunking] = None
+    heuristic_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
+
     # Explicit overrides (user-defined)
-    override_chunking: Optional[ChunkingConfig] = None
-    override_strategies: Optional[List[str]] = None
-    override_ingestion: Optional[IngestionConfig] = None
-    
+    override_chunking: Optional[Chunking] = None
+    override_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
+    override_ingestion: Optional[Ingestion] = None
+
     # Processing flags
     enabled: bool = True
     last_scanned: Optional[str] = None
 
 
-class DocumentsConfig(BaseModel):
-    """Root documents.yaml configuration."""
+@dataclass
+class Documents:
     version: str = "1.0"
-    documents: Dict[str, DocumentConfig] = Field(default_factory=dict)
+    documents: Dict[str, DocumentConfig] = field(default_factory=dict)
     global_overrides: Optional[Dict[str, Any]] = None
-    
+
     @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> "DocumentsConfig":
-        """Load documents configuration from YAML file."""
+    def from_yaml(cls, path: Union[str, Path]) -> "Documents":
         if not Path(path).exists():
             return cls()
-        
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        return cls(**data)
-    
+        # normalize 'documents'
+        docs = data.get("documents") or {}
+        data["documents"] = {
+            k: _dataclass_from_dict(DocumentConfig, v if isinstance(v, dict) else {})
+            for k, v in docs.items()
+        }
+        return _dataclass_from_dict(cls, data)
+
     def to_yaml(self, path: Union[str, Path]) -> None:
-        """Save documents configuration to YAML file."""
         with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
-    
-    def get_effective_config(self, document_key: str, base_config: "Config") -> "Config":
+            yaml.safe_dump(_as_plain(self), f, sort_keys=False, indent=2)
+
+    # ---------------- merge logic with base Config ---------------------
+
+    def get_effective_config(self, document_key: str, base_config: Config) -> Config:
         """
-        Compute effective configuration for a document using layering precedence:
-        1. Global defaults from base_config
-        2. Heuristic defaults per-PDF
-        3. Explicit per-PDF overrides
-        4. CLI overrides (handled by caller)
+        Precedence:
+          1) base_config (defaults + config.yaml)
+          2) heuristic_* (from documents.yaml)
+          3) override_*  (from documents.yaml)
         """
-        # TODO: Implement configuration layering logic
-        # For now, return base config as-is
-        return base_config
-    
+        doc = self.documents.get(document_key)
+        if not doc:
+            return copy.deepcopy(base_config)
+
+        eff = copy.deepcopy(base_config)
+
+        # ---- Ingestion & Chunking ----
+        # Start from base ingestion, merge heuristic chunking, then override chunking.
+        if doc.heuristic_chunking:
+            eff.pipeline.ingestion.chunking = _coerce_to_dc(
+                eff.pipeline.ingestion.chunking,
+                _as_plain(doc.heuristic_chunking)
+            )
+        if doc.override_chunking:
+            eff.pipeline.ingestion.chunking = _coerce_to_dc(
+                eff.pipeline.ingestion.chunking,
+                _as_plain(doc.override_chunking)
+            )
+        # Full ingestion override (merge-by-field to keep other flags)
+        if doc.override_ingestion:
+            eff.pipeline.ingestion = _coerce_to_dc(
+                eff.pipeline.ingestion,
+                _as_plain(doc.override_ingestion)
+            )
+
+        # ---- Strategies (list) ----
+        # Base list -> optionally filter/compose by heuristic/override lists.
+        base_list = copy.deepcopy(eff.generate.strategies)
+
+        def _normalize_strategy_item(x: Union[str, Dict[str, Any], Strategy]) -> Strategy:
+            if isinstance(x, Strategy):
+                return x
+            if isinstance(x, str):
+                # If only a name is given, adopt base item if present; else create a simple Strategy.
+                ref = next((s for s in base_list if s.name == x), None)
+                return copy.deepcopy(ref) if ref else Strategy(name=x, prompt=x, note="basic")
+            if isinstance(x, dict):
+                # If dict has name: merge onto base same-name, else create fresh
+                name = x.get("name", "")
+                ref = next((s for s in base_list if s.name == name), None)
+                merged = _as_plain(ref) if ref else _as_plain(Strategy(name=name))
+                merged = _deep_merge(merged, x)
+                return _dataclass_from_dict(Strategy, merged)
+            return Strategy()  # fallback harmless default
+
+        # Compose order: base -> heuristic (append/override) -> override (append/override).
+        composed = base_list[:]
+        if doc.heuristic_strategies:
+            composed.extend(_normalize_strategy_item(x) for x in doc.heuristic_strategies)
+        if doc.override_strategies:
+            composed.extend(_normalize_strategy_item(x) for x in doc.override_strategies)
+
+        eff.generate.strategies = _unique_by_name(composed)
+
+        return eff
+
     def add_or_update_document(self, file_path: str, metadata: DocumentMetadata) -> None:
-        """Add or update a document in the configuration."""
-        key = str(Path(file_path).name)  # Use filename as key
-        
-        if key in self.documents:
-            # Update existing document
-            self.documents[key].metadata = metadata
-            self.documents[key].last_scanned = str(Path().cwd())  # TODO: Use proper timestamp
+        key = Path(file_path).name
+        existing = self.documents.get(key)
+        if existing:
+            existing.metadata = metadata
         else:
-            # Add new document
             self.documents[key] = DocumentConfig(
                 file_path=file_path,
                 metadata=metadata,
-                last_scanned=str(Path().cwd())  # TODO: Use proper timestamp
             )
 
 
-class Config(BaseSettings):
-    """Complete pdf2anki configuration."""
-    
-    project: ProjectConfig = Field(default_factory=ProjectConfig)
-    inputs: InputConfig = Field(default_factory=InputConfig)
-    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
-    generate: GenerateConfig = Field(default_factory=GenerateConfig)
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        env_nested_delimiter = "__"
-
-    @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> "Config":
-        """Load configuration from YAML file with legacy support."""
-        import warnings
-        
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        
-        # Check if this is a legacy config (has top-level keys like llm, strategies, etc.)
-        legacy_keys = {
-            'ingestion', 'llm', 'strategies', 'rag', 'deduplication', 
-            'hallucination', 'review', 'tags', 'taxonomy', 'ids', 'anki', 
-            'output', 'telemetry', 'language'
-        }
-        
-        found_legacy_keys = set(data.keys()) & legacy_keys
-        
-        if found_legacy_keys:
-            warnings.warn(
-                "Legacy configuration format detected. Please migrate to the new "
-                "generate + pipeline schema. Legacy support will be removed in the next minor version.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-            
-            # Auto-translate legacy config
-            translated_data = {
-                'project': data.get('project', {}),
-                'inputs': data.get('inputs', {}),
-                'pipeline': {
-                    'ingestion': data.get('ingestion', {}),
-                    'llm': data.get('llm', {}),
-                    'rag': data.get('rag', {}),
-                    'deduplication': data.get('deduplication', {}),
-                    'hallucination': data.get('hallucination', {}),
-                    'review': data.get('review', {}),
-                    'telemetry': data.get('telemetry', {}),
-                },
-                'generate': {
-                    'strategies': data.get('strategies', {}),
-                    'tags': data.get('tags', {}),
-                    'taxonomy': data.get('taxonomy', {}),
-                    'ids': data.get('ids', {}),
-                    'language': data.get('language', 'en'),
-                    'anki': data.get('anki', {}),
-                    'output': data.get('output', {}),
-                }
-            }
-            data = translated_data
-        
-        return cls(**data)
-
-    def to_yaml(self, path: Union[str, Path]) -> None:
-        """Save configuration to YAML file with proper scalar serialization."""
-        def represent_enum(dumper, data):
-            return dumper.represent_scalar('tag:yaml.org,2002:str', data.value)
-        
-        def represent_path(dumper, data):
-            return dumper.represent_scalar('tag:yaml.org,2002:str', str(data))
-        
-        # Register custom representers for enums and paths
-        yaml.add_representer(ProviderType, represent_enum)
-        yaml.add_representer(ChunkingMode, represent_enum)
-        yaml.add_representer(DeckStructure, represent_enum)
-        yaml.add_representer(IdStrategy, represent_enum)
-        yaml.add_representer(DeduplicationPolicy, represent_enum)
-        yaml.add_representer(DocumentType, represent_enum)
-        yaml.add_representer(Path, represent_path)
-        # Support for different pathlib types
-        import pathlib
-        yaml.add_representer(pathlib.PosixPath, represent_path)
-        yaml.add_representer(pathlib.WindowsPath, represent_path)
-        yaml.add_representer(pathlib.PurePath, represent_path)
-        
-        with open(path, "w", encoding="utf-8") as f:
-            yaml.dump(self.model_dump(), f, default_flow_style=False, indent=2)
-
-    def create_workspace(self) -> None:
-        """Create workspace directories."""
-        self.generate.output.workspace.mkdir(parents=True, exist_ok=True)
-        self.generate.output.media_path.mkdir(parents=True, exist_ok=True)
-    
-    # Legacy property access for backward compatibility
-    @property
-    def ingestion(self):
-        """Legacy access to pipeline.ingestion."""
-        return self.pipeline.ingestion
-    
-    @property 
-    def llm(self):
-        """Legacy access to pipeline.llm."""
-        return self.pipeline.llm
-    
-    @property
-    def strategies(self):
-        """Legacy access to generate.strategies."""
-        return self.generate.strategies
-    
-    @property
-    def rag(self):
-        """Legacy access to pipeline.rag."""
-        return self.pipeline.rag
-    
-    @property
-    def deduplication(self):
-        """Legacy access to pipeline.deduplication."""
-        return self.pipeline.deduplication
-    
-    @property
-    def hallucination(self):
-        """Legacy access to pipeline.hallucination."""
-        return self.pipeline.hallucination
-    
-    @property
-    def review(self):
-        """Legacy access to pipeline.review.""" 
-        return self.pipeline.review
-    
-    @property
-    def tags(self):
-        """Legacy access to generate.tags."""
-        return self.generate.tags
-    
-    @property
-    def taxonomy(self):
-        """Legacy access to generate.taxonomy."""
-        return self.generate.taxonomy
-    
-    @property
-    def ids(self):
-        """Legacy access to generate.ids."""
-        return self.generate.ids
-    
-    @property
-    def language(self):
-        """Legacy access to generate.language."""
-        return self.generate.language
-    
-    @property
-    def anki(self):
-        """Legacy access to generate.anki."""
-        return self.generate.anki
-    
-    @property
-    def output(self):
-        """Legacy access to generate.output."""
-        return self.generate.output
-    
-    @property 
-    def telemetry(self):
-        """Legacy access to pipeline.telemetry."""
-        return self.pipeline.telemetry
+# --------------------------- usage example ---------------------------
+# cfg = Config.from_yaml("config.yaml")
+# docs = Documents.from_yaml("documents.yaml")
+# eff = docs.get_effective_config("example.pdf", cfg)
+# eff.to_yaml("effective.yaml")
+# eff.create_workspace()

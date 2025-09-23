@@ -333,7 +333,7 @@ def extract_pdf_content(
     """Extract comprehensive content from a PDF file."""
     logger.info(f"Processing PDF: {pdf_path}")
     
-    with PDFDocument(pdf_path) as pdf_doc:
+    with PDFDocument(Path(pdf_path)) as pdf_doc:
         # Extract text from all pages
         pages_data = pdf_doc.extract_text()
         

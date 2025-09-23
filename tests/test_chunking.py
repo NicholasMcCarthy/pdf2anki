@@ -4,6 +4,7 @@ import pytest
 
 from pdf2anki.chunking import TextChunk, TextChunker
 from pdf2anki.config import ChunkingConfig, ChunkingMode
+from pdf2anki.config import Config
 
 
 def create_mock_pdf_content(pages_text):
@@ -69,7 +70,6 @@ def test_chunker_initialization():
 
 def test_token_counting():
     """Test token counting functionality."""
-    config = ChunkingConfig()
     chunker = TextChunker(config, model="gpt-4")
     
     # Test simple text

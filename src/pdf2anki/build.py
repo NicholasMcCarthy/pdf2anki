@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 import genanki
 import pandas as pd
 
-from .config import AnkiConfig, Config, DeckStructure
+from .config import Config # AnkiConfig, Config, DeckStructure
 from .io import load_csv
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class AnkiDeckBuilder:
     """Builds Anki decks from CSV data using genanki."""
     
-    def __init__(self, config: AnkiConfig):
+    def __init__(self, config: Config):
         self.config = config
         self.note_types = {}
         self.decks = {}
@@ -280,13 +280,13 @@ class AnkiDeckBuilder:
         
         decks = {}
         
-        if self.config.deck_structure == DeckStructure.FLAT:
+        if self.config.anki.deck_structure == "flat":
             # Single flat deck
             deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
             deck = genanki.Deck(deck_id, self.config.deck_name)
             decks['main'] = deck
             
-        elif self.config.deck_structure == DeckStructure.BY_CHAPTER:
+        elif self.config.anki.deck_structure == "chapter":
             # Create subdecks by section/chapter
             sections = df['section'].dropna().unique()
             
@@ -304,7 +304,7 @@ class AnkiDeckBuilder:
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
                 
-        elif self.config.deck_structure == DeckStructure.BY_THEME:
+        elif self.config.anki.deck_structure == "theme":
             # Create subdecks by strategy/theme
             strategies = df['strategy'].dropna().unique()
             
@@ -334,12 +334,12 @@ class AnkiDeckBuilder:
     def _get_deck_for_card(self, row: pd.Series, decks: Dict[str, genanki.Deck]) -> genanki.Deck:
         """Get the appropriate deck for a card based on deck structure."""
         
-        if self.config.deck_structure == DeckStructure.BY_CHAPTER:
+        if self.config.anki.deck_structure == "chapter":
             section = row.get('section')
             if section and str(section).strip() in decks:
                 return decks[str(section).strip()]
         
-        elif self.config.deck_structure == DeckStructure.BY_THEME:
+        elif self.config.anki.deck_structure == "theme":
             strategy = row.get('strategy')
             if strategy and str(strategy).strip() in decks:
                 return decks[str(strategy).strip()]
@@ -388,10 +388,10 @@ class AnkiDeckBuilder:
             fields=[
                 front,  # Front
                 back,   # Back
-                source_info['source'],  # Source
-                source_info['page'],    # Page
-                source_info['section'], # Section
-                ';'.join(tags),        # Tags (for display)
+                source_info['source'],      # Source
+                source_info['page'],        # Page
+                source_info['section'],     # Section
+                ';'.join(tags),             # Tags (for display)
                 str(row.get('extra', '')),  # Extra
             ],
             tags=tags,
