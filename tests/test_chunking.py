@@ -70,6 +70,7 @@ def test_chunker_initialization():
 
 def test_token_counting():
     """Test token counting functionality."""
+    config = ChunkingConfig()
     chunker = TextChunker(config, model="gpt-4")
     
     # Test simple text

@@ -240,14 +240,30 @@ class Strategies:
         else:
             raise KeyError(key)
     
+    def __deepcopy__(self, memo):
+        """Custom deepcopy to avoid __dict__ issues."""
+        return Strategies(
+            key_points=copy.deepcopy(self.key_points, memo),
+            cloze_definitions=copy.deepcopy(self.cloze_definitions, memo),
+            figure_based=copy.deepcopy(self.figure_based, memo)
+        )
+    
     def __getattribute__(self, name):
         if name == '__dict__':
-            # Return a dict-like view for legacy compatibility
-            return {
-                'key_points': self.key_points,
-                'cloze_definitions': self.cloze_definitions,  
-                'figure_based': self.figure_based
-            }
+            # Return a dict-like view for legacy compatibility  
+            # Use object.__getattribute__ to avoid recursion
+            try:
+                key_points = object.__getattribute__(self, 'key_points')
+                cloze_definitions = object.__getattribute__(self, 'cloze_definitions')
+                figure_based = object.__getattribute__(self, 'figure_based')
+                return {
+                    'key_points': key_points,
+                    'cloze_definitions': cloze_definitions,  
+                    'figure_based': figure_based
+                }
+            except AttributeError:
+                # Fallback to regular __dict__ during object construction
+                return object.__getattribute__(self, '__dict__')
         return super().__getattribute__(name)
 
 
@@ -555,9 +571,25 @@ class Documents:
                 _as_plain(doc.override_ingestion)
             )
 
-        # ---- Strategies (list) ----
-        # Base list -> optionally filter/compose by heuristic/override lists.
-        base_list = copy.deepcopy(eff.generate.strategies)
+        # ---- Strategies ----
+        # Convert Strategies object to list for processing, then back to object
+        def strategies_to_list(strategies: Strategies) -> List[Strategy]:
+            """Convert Strategies dataclass to list for processing."""
+            return [strategies.key_points, strategies.cloze_definitions, strategies.figure_based]
+        
+        def list_to_strategies(strategy_list: List[Strategy]) -> Strategies:
+            """Convert list back to Strategies dataclass."""
+            result = Strategies()
+            for strategy in strategy_list:
+                if strategy.name == "key_points":
+                    result.key_points = strategy
+                elif strategy.name == "cloze_definitions":
+                    result.cloze_definitions = strategy
+                elif strategy.name == "figure_based":
+                    result.figure_based = strategy
+            return result
+        
+        base_list = strategies_to_list(eff.generate.strategies)
 
         def _normalize_strategy_item(x: Union[str, Dict[str, Any], Strategy]) -> Strategy:
             if isinstance(x, Strategy):
@@ -582,7 +614,7 @@ class Documents:
         if doc.override_strategies:
             composed.extend(_normalize_strategy_item(x) for x in doc.override_strategies)
 
-        eff.generate.strategies = _unique_by_name(composed)
+        eff.generate.strategies = list_to_strategies(_unique_by_name(composed))
 
         return eff
 
@@ -611,6 +643,7 @@ IdsConfig = Ids
 GenerateConfig = Generate
 PipelineConfig = Pipeline
 DocumentsConfig = Documents
+ReviewConfig = Review
 
 # Enums converted to string constants
 class IdStrategy:
