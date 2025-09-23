@@ -10,9 +10,10 @@ Lightweight, permissive config using dataclasses (no Pydantic).
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field, fields, asdict, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, get_origin, get_args
+from typing import Any, Dict, List, Optional, Union, get_origin, get_args, get_type_hints
 import copy
 import yaml
 
@@ -50,18 +51,30 @@ def _dataclass_from_dict(dc_type, data: Dict[str, Any]):
     """Create dataclass instance from dict, ignoring unknown keys, recursing into nested dataclasses."""
     if not is_dataclass(dc_type):
         return data  # not a dataclass type
+    
+    # Get resolved type hints to handle forward references
+    try:
+        type_hints = get_type_hints(dc_type)
+    except (NameError, AttributeError):
+        # Fallback to field types if type hints can't be resolved
+        type_hints = {f.name: f.type for f in fields(dc_type)}
+    
     kwargs = {}
     for f in fields(dc_type):
         key = f.name
         if key not in data:
             continue
         raw = data[key]
+        
+        # Use resolved type hint instead of field type
+        field_type = type_hints.get(key, f.type)
+        
         # handle Optional[T], List[T], Dict[K,V], nested dataclasses
-        origin = get_origin(f.type)
-        args = get_args(f.type)
+        origin = get_origin(field_type)
+        args = get_args(field_type)
 
-        if is_dataclass(f.type) and isinstance(raw, dict):
-            kwargs[key] = _dataclass_from_dict(f.type, raw)
+        if is_dataclass(field_type) and isinstance(raw, dict):
+            kwargs[key] = _dataclass_from_dict(field_type, raw)
 
         elif origin is Union and len(args) == 2 and type(None) in args:
             inner = args[0] if args[1] is type(None) else args[1]
@@ -179,6 +192,63 @@ class Strategy:
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
     min_score: Optional[float] = None
+    template_version: str = "1.0"
+
+
+@dataclass
+class Strategies:
+    """Collection of strategy configurations."""
+    key_points: Strategy = field(default_factory=lambda: Strategy(
+        name="key_points", 
+        prompt="key_points", 
+        note="basic", 
+        enabled=True
+    ))
+    cloze_definitions: Strategy = field(default_factory=lambda: Strategy(
+        name="cloze_definitions", 
+        prompt="cloze_definitions", 
+        note="cloze", 
+        enabled=True
+    ))
+    figure_based: Strategy = field(default_factory=lambda: Strategy(
+        name="figure_based", 
+        prompt="figure_based", 
+        note="image_occlusion", 
+        enabled=True
+    ))
+    
+    def items(self):
+        """Support for dict-like .items() iteration."""
+        return [
+            ('key_points', self.key_points),
+            ('cloze_definitions', self.cloze_definitions),  
+            ('figure_based', self.figure_based)
+        ]
+    
+    def keys(self):
+        """Support for dict-like .keys() iteration."""
+        return ['key_points', 'cloze_definitions', 'figure_based']
+    
+    def __getitem__(self, key):
+        """Support for dict-like access."""
+        if key == 'key_points':
+            return self.key_points
+        elif key == 'cloze_definitions':
+            return self.cloze_definitions
+        elif key == 'figure_based':
+            return self.figure_based
+        else:
+            raise KeyError(key)
+    
+    def __getattribute__(self, name):
+        if name == '__dict__':
+            # Return a dict-like view for legacy compatibility
+            return {
+                'key_points': self.key_points,
+                'cloze_definitions': self.cloze_definitions,  
+                'figure_based': self.figure_based
+            }
+        return super().__getattribute__(name)
 
 
 @dataclass
@@ -277,7 +347,7 @@ class Pipeline:
 
 @dataclass
 class Generate:
-    strategies: List[Strategy] = field(default_factory=lambda: [Strategy()])
+    strategies: Strategies = field(default_factory=Strategies)
     tags: Tags = field(default_factory=Tags)
     taxonomy: Taxonomy = field(default_factory=Taxonomy)
     ids: Ids = field(default_factory=Ids)
@@ -305,6 +375,40 @@ class Config:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
+        # Handle legacy format - move top-level keys to correct nested locations
+        legacy_keys = ["llm", "ingestion", "rag", "deduplication", "hallucination", "review", "telemetry"]
+        has_legacy = any(key in data for key in legacy_keys)
+        
+        if has_legacy:
+            warnings.warn(
+                "Legacy configuration format detected. Please update to the new nested format. "
+                "See documentation for migration guide.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+            
+            # Convert legacy flat structure to nested structure
+            if "pipeline" not in data:
+                data["pipeline"] = {}
+            
+            for key in legacy_keys:
+                if key in data:
+                    data["pipeline"][key] = data.pop(key)
+            
+            # Handle legacy strategy structure
+            if "strategies" in data:
+                if "generate" not in data:
+                    data["generate"] = {}
+                data["generate"]["strategies"] = data.pop("strategies")
+            
+            # Handle other legacy generate-level keys
+            legacy_generate_keys = ["anki", "output", "tags", "taxonomy", "ids", "language"]
+            for key in legacy_generate_keys:
+                if key in data:
+                    if "generate" not in data:
+                        data["generate"] = {}
+                    data["generate"][key] = data.pop(key)
+
         # Merge raw YAML into defaults as dicts (permits unknown keys)
         merged = _deep_merge(_as_plain(cls()), data)
 
@@ -330,7 +434,7 @@ class Config:
     @property
     def llm(self) -> LLM: return self.pipeline.llm
     @property
-    def strategies(self) -> List[Strategy]: return self.generate.strategies
+    def strategies(self) -> Strategies: return self.generate.strategies
     @property
     def rag(self) -> RAG: return self.pipeline.rag
     @property
@@ -493,6 +597,43 @@ class Documents:
                 metadata=metadata,
             )
 
+
+# ------------------------ type aliases and compatibility ---------------------
+
+# Type aliases for backward compatibility with existing imports
+ChunkingConfig = Chunking
+LLMConfig = LLM  
+StrategyConfig = Strategy
+RAGConfig = RAG
+DeduplicationConfig = Deduplication
+TelemetryConfig = Telemetry
+IdsConfig = Ids
+GenerateConfig = Generate
+PipelineConfig = Pipeline
+DocumentsConfig = Documents
+
+# Enums converted to string constants
+class IdStrategy:
+    CONTENT_HASH = "content_hash"
+    PERSISTENT = "persistent"
+
+class DeduplicationPolicy:
+    OR = "or"
+    AND = "and"
+
+class DocumentType:
+    RESEARCH_PAPER = "research_paper"
+    TEXTBOOK = "textbook"
+    UNKNOWN = "unknown"
+
+class ChunkingMode:
+    PAGES = "pages"
+    SECTIONS = "sections"
+    PARAGRAPHS = "paragraphs"
+    SMART = "smart"
+    FIGURES = "figures"
+    HIGHLIGHTS = "highlights"
+    ENTIRE = "entire"
 
 # --------------------------- usage example ---------------------------
 # cfg = Config.from_yaml("config.yaml")
