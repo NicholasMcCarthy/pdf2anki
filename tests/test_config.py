@@ -16,10 +16,10 @@ def test_default_config():
     config = Config()
     
     assert config.project.name == "pdf2anki"
-    assert config.llm.provider.value == "openai"
+    assert config.llm.provider == "openai"
     assert config.llm.model == "gpt-4-1106-preview"
     assert config.llm.temperature == 0.0
-    assert config.ids.strategy.value == "content_hash"
+    assert config.ids.strategy == "content_hash"
     assert config.anki.deck_name == "PDF2Anki"
 
 
@@ -141,22 +141,23 @@ def test_strategy_config_validation():
 
 
 def test_invalid_enum_values():
-    """Test handling of invalid enum values."""
-    with pytest.raises(ValueError):
-        config_data = {
-            "llm": {
-                "provider": "invalid_provider"
-            }
+    """Test handling of invalid enum values - now accepts any string."""
+    config_data = {
+        "llm": {
+            "provider": "invalid_provider"
         }
-        
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
-            yaml.dump(config_data, f)
-            yaml_path = f.name
-        
-        try:
-            Config.from_yaml(yaml_path)
-        finally:
-            os.unlink(yaml_path)
+    }
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        yaml.dump(config_data, f)
+        yaml_path = f.name
+    
+    try:
+        # Should not raise error - invalid values are now accepted as strings
+        config = Config.from_yaml(yaml_path)
+        assert config.llm.provider == "invalid_provider"
+    finally:
+        os.unlink(yaml_path)
 
 
 def test_legacy_config_loading_with_deprecation_warning():
@@ -185,7 +186,7 @@ def test_legacy_config_loading_with_deprecation_warning():
         
         # Check that config was properly translated
         assert config.project.name == "test"
-        assert config.pipeline.llm.provider.value == "openai"
+        assert config.pipeline.llm.provider == "openai"
         assert config.generate.strategies.key_points.enabled is True
         assert str(config.generate.output.workspace) == "test_workspace"
         
@@ -222,7 +223,7 @@ def test_new_config_format_no_warning():
         
         # Check that config loaded correctly
         assert config.project.name == "test"
-        assert config.pipeline.llm.provider.value == "openai"
+        assert config.pipeline.llm.provider == "openai"
         assert config.generate.strategies.key_points.enabled is True
         
     finally:
@@ -234,7 +235,7 @@ def test_legacy_property_access():
     config = Config()
     
     # These should work via legacy properties
-    assert config.llm.provider.value == "openai"
+    assert config.llm.provider == "openai"
     assert config.strategies.key_points.enabled is True
     assert config.anki.deck_name == "PDF2Anki"
     assert config.output.workspace == Path("workspace")
@@ -278,6 +279,6 @@ def test_pipeline_config_class():
     """Test PipelineConfig class independently.""" 
     pipeline_config = PipelineConfig()
     
-    assert pipeline_config.llm.provider.value == "openai"
-    assert pipeline_config.ingestion.chunking.mode.value == "smart"
+    assert pipeline_config.llm.provider == "openai"
+    assert pipeline_config.ingestion.chunking.mode == "smart"
     assert pipeline_config.telemetry.enabled is True

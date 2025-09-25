@@ -3,9 +3,8 @@
 import json
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-
-from pydantic import BaseModel, validator
 
 from ..chunking import TextChunk
 from ..config import StrategyConfig
@@ -15,16 +14,17 @@ from ..prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 
-class FlashcardData(BaseModel):
+@dataclass
+class FlashcardData:
     """Base flashcard data structure."""
     
     # Core fields (all cards have these)
-    id: Optional[str] = None  # Added for reviewer functionality
     note_type: str
     page_citation: str
     core_concept: str
+    id: Optional[str] = None  # Added for reviewer functionality
     difficulty: str = "medium"
-    tags: List[str] = []
+    tags: List[str] = field(default_factory=list)
     
     # Strategy-specific fields (will be added by subclasses)
     front: Optional[str] = None
@@ -43,20 +43,35 @@ class FlashcardData(BaseModel):
     strategy: str = ""
     template_version: str = "1.0"
     original_text: Optional[str] = None
-    metadata: Dict[str, Any] = {}  # Added for reviewer functionality
+    back: Optional[str] = None
+    cloze_text: Optional[str] = None
+    extra: Optional[str] = None
     
-    @validator("difficulty")
-    def validate_difficulty(cls, v):
+    # Metadata fields
+    source_pdf: str = ""
+    page_start: int = 0
+    page_end: int = 0
+    section: Optional[str] = None
+    ref_citation: str = ""
+    llm_model: str = ""
+    llm_version: str = ""
+    strategy: str = ""
+    template_version: str = "1.0"
+    original_text: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)  # Added for reviewer functionality
+    
+    def __post_init__(self):
+        """Validate and clean up fields after initialization."""
+        # Validate difficulty
         valid_levels = ["easy", "medium", "hard"]
-        if v not in valid_levels:
-            return "medium"
-        return v
-    
-    @validator("tags", pre=True)
-    def validate_tags(cls, v):
-        if isinstance(v, str):
-            return [tag.strip() for tag in v.split(";") if tag.strip()]
-        return v or []
+        if self.difficulty not in valid_levels:
+            self.difficulty = "medium"
+        
+        # Validate and clean tags
+        if isinstance(self.tags, str):
+            self.tags = [tag.strip() for tag in self.tags.split(";") if tag.strip()]
+        elif not self.tags:
+            self.tags = []
 
 
 class BaseStrategy(ABC):
