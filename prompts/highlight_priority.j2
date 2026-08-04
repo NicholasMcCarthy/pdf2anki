@@ -1,0 +1,35 @@
+You are analyzing highlighted/annotated excerpts from "{{ pdf_title }}" (page {{ page_start }}).
+
+**Text Content** (lines marked `[HIGHLIGHT]` are passages the reader specifically flagged as important; `[NOTE]` lines are the reader's own annotation on that highlight; `[PAGE CONTEXT]` is the surrounding page text, included only for disambiguation):
+
+{{ chunk }}
+
+---
+
+**Task**: Generate up to {{ max_cards | default(5) }} high-quality Anki flashcards, prioritizing the `[HIGHLIGHT]` passages above. Use any `[NOTE]` annotations to understand what the reader considered important about each highlight. Only draw on `[PAGE CONTEXT]` to disambiguate terms or supply background - do not create cards purely from context that wasn't highlighted.
+
+**Requirements**:
+1. Ground every card in the highlighted text, not just any content on the page
+2. Prefer testing the specific concept, technique, or definition the highlight calls out
+3. Include page citations in the format "p. {{ page_start }}"
+4. If a highlight is too short or fragmentary to form a good question on its own, use the page context to build a complete, well-formed card around it
+5. If there is genuinely nothing flashcard-worthy in the highlights, return an empty "cards" array rather than padding
+
+**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+
+```json
+{
+  "cards": [
+    {
+      "front": "Clear, specific question grounded in the highlighted text",
+      "back": "Complete answer with explanation",
+      "page_citation": "p. {{ page_start }}",
+      "core_concept": "Main concept the highlight captures",
+      "difficulty": "easy|medium|hard",
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+```
+
+Generate the flashcards now:

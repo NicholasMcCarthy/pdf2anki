@@ -134,10 +134,14 @@ def test_get_heuristic_defaults():
     )
     
     defaults = get_heuristic_defaults(research_metadata)
-    
-    assert defaults["chunking_mode"] == "sections"
+
+    # Papers prioritize the reader's own highlights/annotations; chunking falls
+    # back to "smart" per-PDF when a given paper has no annotations at all.
+    assert defaults["chunking_mode"] == "highlights"
     assert defaults["tokens_per_chunk"] == 1500  # Smaller for research papers
+    assert "highlight_priority" in defaults["strategies"]
     assert "key_points" in defaults["strategies"]
+    assert defaults["extract_annotations"] is True
     
     # Test textbook defaults
     textbook_metadata = DocumentMetadata(

@@ -15,7 +15,12 @@ from .llm import create_llm_provider
 from .pdf import extract_pdf_content
 from .prompts import create_prompt_manager
 from .rag import create_rag_manager
-from .strategies import ClozeDefinitionsStrategy, FigureBasedStrategy, KeyPointsStrategy
+from .strategies import (
+    ClozeDefinitionsStrategy,
+    FigureBasedStrategy,
+    HighlightPriorityStrategy,
+    KeyPointsStrategy,
+)
 from .strategies.base import FlashcardData
 from .telemetry import create_telemetry_collector
 
@@ -149,10 +154,8 @@ def finalize_generation(
         # Set deck name
         card_dict["deck"] = config.anki.deck_name
 
-        # Add media references if relevant
-        card_media = []
-        # TODO: Link images to cards based on page ranges
-        card_dict["media"] = card_media
+        # card_dict["media"] already carries whatever the strategy set on the
+        # FlashcardData (e.g. highlight/figure screenshot filenames) via asdict().
 
         # Add additional metadata
         card_dict["longtext"] = ""  # For future use
@@ -231,6 +234,7 @@ def process_single_pdf(
         pdf_path=pdf_path,
         extract_images=config.ingestion.extract_images,
         extract_structure=True,
+        extract_annotations=config.ingestion.extract_annotations,
         ocr_fallback=config.ingestion.ocr_fallback
     )
     
@@ -274,6 +278,14 @@ def process_single_pdf(
             prompt_manager=prompt_manager,
             strategy_config=config.strategies.figure_based,
             strategy_name="figure_based"
+        ))
+
+    if config.strategies.highlight_priority.enabled:
+        strategies.append(HighlightPriorityStrategy(
+            llm_provider=llm_provider,
+            prompt_manager=prompt_manager,
+            strategy_config=config.strategies.highlight_priority,
+            strategy_name="highlight_priority"
         ))
     
     # Generate cards from chunks

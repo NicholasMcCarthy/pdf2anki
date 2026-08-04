@@ -213,9 +213,13 @@ def get_heuristic_defaults(metadata: DocumentMetadata) -> Dict[str, any]:
     
     # Suggest chunking strategy based on document type
     if metadata.doc_type == DocumentType.RESEARCH_PAPER:
-        defaults["chunking_mode"] = "sections"
+        # Papers: prioritize the reader's own highlights/annotations (screenshotted
+        # and turned into cards first), falling back to smart chunking wherever a
+        # given paper has no annotations at all (see chunking._chunk_by_highlights).
+        defaults["chunking_mode"] = "highlights"
         defaults["tokens_per_chunk"] = 1500  # Smaller chunks for papers
-        defaults["strategies"] = ["key_points", "cloze_definitions"]
+        defaults["strategies"] = ["highlight_priority", "key_points", "cloze_definitions"]
+        defaults["extract_annotations"] = True
     elif metadata.doc_type == DocumentType.TEXTBOOK:
         defaults["chunking_mode"] = "smart"
         defaults["tokens_per_chunk"] = 2500  # Larger chunks for textbooks

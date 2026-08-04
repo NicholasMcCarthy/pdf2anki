@@ -103,6 +103,16 @@ Guidelines:
 4. Include references to specific figures or tables
 5. Create cards that connect visual information to broader concepts""",
 
+    "highlight_priority": """You are an expert educational content creator specializing in converting a reader's own highlights and annotations into effective Anki flashcards. Your task is to ground each flashcard in text the reader specifically flagged as important, using surrounding page context only to disambiguate or fill gaps.
+
+Guidelines:
+1. Prioritize highlighted passages over any other content on the page
+2. Use the reader's own notes on a highlight (if present) to understand why it mattered to them
+3. Create clear, specific questions that test the highlighted concept
+4. Do not invent cards from unhighlighted page context alone
+5. Include page citations for reference
+6. If nothing highlighted is flashcard-worthy, return no cards rather than padding""",
+
     "reviewer": """You are an expert educational content reviewer. Your task is to evaluate flashcard quality and suggest improvements. Focus on clarity, accuracy, educational value, and adherence to best practices for spaced repetition learning.
 
 Evaluation criteria:

@@ -15,14 +15,16 @@ class TextChunk:
     """Represents a chunk of text with metadata."""
     
     def __init__(
-        self, 
-        text: str, 
-        start_page: int, 
+        self,
+        text: str,
+        start_page: int,
         end_page: int,
         section: Optional[str] = None,
         subsection: Optional[str] = None,
         chunk_index: int = 0,
         total_chunks: int = 1,
+        chunk_type: str = "text",
+        highlights: Optional[List[Dict]] = None,
     ):
         self.text = text
         self.start_page = start_page
@@ -34,6 +36,11 @@ class TextChunk:
         self.token_count = 0
         self.word_count = len(text.split())
         self.char_count = len(text)
+        # chunk_type/highlights: populated for highlight-priority chunks (see
+        # TextChunker._chunk_by_highlights) so strategies can attach highlight
+        # screenshots to generated cards. Unused (defaults) for every other mode.
+        self.chunk_type = chunk_type
+        self.highlights = highlights
     
     def __repr__(self) -> str:
         return f"TextChunk(pages={self.start_page}-{self.end_page}, tokens={self.token_count}, section='{self.section}')"
@@ -491,17 +498,61 @@ class TextChunker:
         return self._chunk_smart(pdf_content)
     
     def _chunk_by_highlights(self, pdf_content: Dict) -> List[TextChunk]:
-        """Chunk text by highlighted content and annotations."""
-        # TODO: Implement highlights-based chunking
-        # This should:
-        # 1. Extract highlighted text from PDF annotations
-        # 2. Extract text annotations/comments
-        # 3. Create chunks based on highlighted regions
-        # 4. Include surrounding context for highlights
-        # 5. Preserve highlight metadata (color, author, date)
-        
-        logger.info("Highlights-based chunking not yet implemented, falling back to smart chunking")
-        return self._chunk_smart(pdf_content)
+        """Chunk around highlighted/annotated regions, one chunk per page that has
+        highlights, keeping the highlight text distinct from the surrounding page
+        context and preserving highlight metadata (color, author, date, screenshot).
+
+        Falls back to smart chunking when the PDF has no highlight annotations at
+        all (e.g. extract_annotations was off, or the paper genuinely wasn't
+        annotated) so this mode degrades gracefully rather than producing nothing.
+        """
+        annotations = pdf_content.get("annotations", [])
+        if not annotations:
+            logger.info("No highlight annotations found, falling back to smart chunking")
+            return self._chunk_smart(pdf_content)
+
+        pages_by_num = {p["page_num"]: p for p in pdf_content["pages"]}
+
+        by_page: Dict[int, List[Dict]] = {}
+        for ann in annotations:
+            by_page.setdefault(ann["page_num"], []).append(ann)
+
+        chunks = []
+        for page_num in sorted(by_page.keys()):
+            page_annotations = by_page[page_num]
+            page_data = pages_by_num.get(page_num)
+            context_text = page_data["raw_text"].strip() if page_data else ""
+
+            highlight_blocks = []
+            for ann in page_annotations:
+                marker = "[HIGHLIGHT"
+                if ann.get("author"):
+                    marker += f" - {ann['author']}"
+                marker += f"]: {ann['text']}"
+                if ann.get("content"):
+                    marker += f"\n[NOTE]: {ann['content']}"
+                highlight_blocks.append(marker)
+
+            chunk_text = "\n\n".join(highlight_blocks)
+            if context_text:
+                chunk_text += f"\n\n[PAGE CONTEXT]:\n{context_text}"
+
+            chunk = TextChunk(
+                text=chunk_text,
+                start_page=page_num,
+                end_page=page_num,
+                chunk_index=len(chunks),
+                chunk_type="highlight",
+                highlights=page_annotations,
+            )
+            chunk.token_count = self.count_tokens(chunk.text)
+            chunks.append(chunk)
+
+        for chunk in chunks:
+            chunk.total_chunks = len(chunks)
+
+        logger.info(f"Created {len(chunks)} highlight-based chunks from {len(annotations)} annotations")
+        return chunks
     
     def _chunk_entire(self, pdf_content: Dict) -> List[TextChunk]:
         """Chunk text as entire document with optional trimming and auto-splitting."""

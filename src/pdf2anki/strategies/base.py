@@ -31,7 +31,7 @@ class FlashcardData:
     back: Optional[str] = None
     cloze_text: Optional[str] = None
     extra: Optional[str] = None
-    
+
     # Metadata fields
     source_pdf: str = ""
     page_start: int = 0
@@ -43,21 +43,7 @@ class FlashcardData:
     strategy: str = ""
     template_version: str = "1.0"
     original_text: Optional[str] = None
-    back: Optional[str] = None
-    cloze_text: Optional[str] = None
-    extra: Optional[str] = None
-    
-    # Metadata fields
-    source_pdf: str = ""
-    page_start: int = 0
-    page_end: int = 0
-    section: Optional[str] = None
-    ref_citation: str = ""
-    llm_model: str = ""
-    llm_version: str = ""
-    strategy: str = ""
-    template_version: str = "1.0"
-    original_text: Optional[str] = None
+    media: List[str] = field(default_factory=list)  # e.g. highlight/figure screenshot filenames
     metadata: Dict[str, Any] = field(default_factory=dict)  # Added for reviewer functionality
     
     def __post_init__(self):

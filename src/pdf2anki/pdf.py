@@ -314,6 +314,89 @@ class PDFDocument:
         
         return chapters
     
+    def extract_annotations(
+        self,
+        start_page: int = 0,
+        end_page: Optional[int] = None,
+    ) -> List[Dict]:
+        """Extract highlight/underline/squiggly/strikeout annotations and the text they cover."""
+        if end_page is None:
+            end_page = self.page_count
+
+        markup_types = {"Highlight", "Underline", "Squiggly", "StrikeOut"}
+        annotations = []
+
+        for page_num in range(start_page, min(end_page, self.page_count)):
+            page = self.doc[page_num]
+
+            for annot in page.annots() or []:
+                try:
+                    annot_type = annot.type[1] if annot.type else None
+                    if annot_type not in markup_types:
+                        continue
+
+                    vertices = annot.vertices
+                    if vertices:
+                        # Text markup annotations store 4 points (one quad) per covered line.
+                        quads = [
+                            fitz.Quad(vertices[i:i + 4]).rect
+                            for i in range(0, len(vertices), 4)
+                        ]
+                        union_rect = quads[0]
+                        for r in quads[1:]:
+                            union_rect |= r
+                        text = " ".join(
+                            page.get_textbox(r).strip() for r in quads
+                        ).strip()
+                    else:
+                        union_rect = annot.rect
+                        text = page.get_textbox(union_rect).strip()
+
+                    if not text:
+                        continue
+
+                    info = annot.info or {}
+                    colors = annot.colors or {}
+
+                    annotations.append({
+                        "page_num": page_num + 1,  # 1-indexed, matches extract_text()
+                        "type": annot_type.lower(),
+                        "text": text,
+                        "rect": tuple(union_rect),
+                        "color": colors.get("stroke"),
+                        "author": info.get("title", ""),
+                        "content": info.get("content", ""),  # user's own note on the highlight
+                        "created": info.get("creationDate", ""),
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to process annotation on page {page_num + 1}: {e}")
+                    continue
+
+        logger.info(f"Extracted {len(annotations)} highlight annotations from PDF")
+        return annotations
+
+    def render_region(
+        self,
+        page_num: int,
+        rect: Tuple[float, float, float, float],
+        padding: float = 24.0,
+        dpi: int = 150,
+    ) -> Image.Image:
+        """Render a padded region of a (1-indexed) page to a PIL Image.
+
+        Used both for highlight-region screenshots and figure/table screenshots -
+        anywhere a "screenshot" of part of a page is needed, as opposed to
+        extract_images()'s pull of embedded XObject images.
+        """
+        page = self.doc[page_num - 1]
+        clip = (fitz.Rect(rect) + (-padding, -padding, padding, padding)) & page.bound()
+
+        zoom = dpi / 72.0
+        pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom))
+
+        img_data = pix.tobytes("ppm")
+        return Image.open(io.BytesIO(img_data))
+
     def get_text_hash(self) -> str:
         """Get a hash of the document's text content for caching."""
         text_content = ""
@@ -328,29 +411,66 @@ def extract_pdf_content(
     pdf_path: Path,
     extract_images: bool = True,
     extract_structure: bool = True,
-    ocr_fallback: bool = False
+    extract_annotations: bool = False,
+    ocr_fallback: bool = False,
+    annotation_screenshot_padding: float = 24.0,
+    annotation_screenshot_dpi: int = 150,
 ) -> Dict:
     """Extract comprehensive content from a PDF file."""
     logger.info(f"Processing PDF: {pdf_path}")
-    
+
     with PDFDocument(Path(pdf_path)) as pdf_doc:
         # Extract text from all pages
         pages_data = pdf_doc.extract_text()
-        
+
         # Extract images if requested
         images = []
         if extract_images:
             images = pdf_doc.extract_images()
-        
+
         # Detect structure if requested
         structure = {}
         if extract_structure:
             structure = pdf_doc.detect_structure()
-        
+
+        # Extract highlight/annotation content, rendering a screenshot of each
+        # highlighted region while the document is still open. Screenshots are
+        # appended to `images` (same shape extract_images() produces) so the
+        # existing save_images()/media pipeline persists them unchanged; the
+        # annotation record only keeps a `screenshot` filename reference.
+        annotations = []
+        if extract_annotations:
+            annotations = pdf_doc.extract_annotations()
+            for idx, ann in enumerate(annotations):
+                try:
+                    screenshot = pdf_doc.render_region(
+                        page_num=ann["page_num"],
+                        rect=ann["rect"],
+                        padding=annotation_screenshot_padding,
+                        dpi=annotation_screenshot_dpi,
+                    )
+                    content_hash = hashlib.md5(screenshot.tobytes()).hexdigest()[:12]
+                    filename = f"highlight_p{ann['page_num']}_{idx}_{content_hash}.png"
+                    images.append({
+                        "page_num": ann["page_num"],
+                        "image_index": f"highlight_{idx}",
+                        "filename": filename,
+                        "width": screenshot.width,
+                        "height": screenshot.height,
+                        "pil_image": screenshot,
+                        "bbox": ann["rect"],
+                    })
+                    ann["screenshot"] = filename
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to render screenshot for annotation on page {ann['page_num']}: {e}"
+                    )
+                    ann["screenshot"] = None
+
         # TODO: Implement OCR fallback if needed
         if ocr_fallback and not any(page["raw_text"].strip() for page in pages_data):
             logger.warning("OCR fallback requested but not implemented yet")
-        
+
         content = {
             "path": pdf_path,
             "metadata": pdf_doc.metadata,
@@ -358,10 +478,14 @@ def extract_pdf_content(
             "pages": pages_data,
             "images": images,
             "structure": structure,
+            "annotations": annotations,
             "content_hash": pdf_doc.get_text_hash(),
         }
-    
-    logger.info(f"Extracted content from {pdf_doc.page_count} pages with {len(images)} images")
+
+    logger.info(
+        f"Extracted content from {pdf_doc.page_count} pages with {len(images)} images "
+        f"and {len(annotations)} highlight annotations"
+    )
     return content
 
 

@@ -13,8 +13,8 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .build import build_anki_deck
-from .config import Config, DocumentsConfig
-from .heuristics import DocumentAnalyzer
+from .config import Chunking, Config, DocumentsConfig, DocumentType
+from .heuristics import DocumentAnalyzer, get_heuristic_defaults
 from .io import clear_cache, load_csv, preview_cards
 from .validate import validate_csv
 
@@ -306,10 +306,31 @@ def scan_docs(
                 
                 # Analyze document
                 metadata = analyzer.analyze_document(pdf_path)
-                
+
                 # Add to documents config
                 documents_config.add_or_update_document(pdf_path, metadata)
-                
+
+                # Apply heuristic chunking/strategy/annotation-extraction defaults
+                # for the detected document type (research paper vs textbook). Only
+                # do this when the classifier is actually confident (not UNKNOWN):
+                # get_effective_config() treats heuristic_* as taking precedence over
+                # the user's global config.yaml, so writing a heuristic suggestion for
+                # every document - including a bland generic one for UNKNOWN docs -
+                # would silently override explicit user config on any document that
+                # isn't confidently classified as a paper or textbook.
+                doc_config = documents_config.documents[Path(pdf_path).name]
+                if metadata.doc_type != DocumentType.UNKNOWN:
+                    defaults = get_heuristic_defaults(metadata)
+                    if "chunking_mode" in defaults:
+                        doc_config.heuristic_chunking = Chunking(
+                            mode=defaults["chunking_mode"],
+                            tokens_per_chunk=defaults.get("tokens_per_chunk", 2000),
+                        )
+                    if "strategies" in defaults:
+                        doc_config.heuristic_strategies = defaults["strategies"]
+                    if "extract_annotations" in defaults:
+                        doc_config.heuristic_extract_annotations = defaults["extract_annotations"]
+
                 # Add to results table
                 results_table.add_row(
                     Path(pdf_path).name,

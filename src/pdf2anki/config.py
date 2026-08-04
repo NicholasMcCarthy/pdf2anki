@@ -169,6 +169,7 @@ class Ingestion:
     chunking: Chunking = field(default_factory=Chunking)
     extract_images: bool = True
     extract_tables: bool = False
+    extract_annotations: bool = False
     ocr_fallback: bool = False
 
 
@@ -216,24 +217,31 @@ class Strategies:
         enabled=True
     ))
     figure_based: Strategy = field(default_factory=lambda: Strategy(
-        name="figure_based", 
-        prompt="figure_based", 
-        note="image_occlusion", 
+        name="figure_based",
+        prompt="figure_based",
+        note="image_occlusion",
         enabled=True
     ))
-    
+    highlight_priority: Strategy = field(default_factory=lambda: Strategy(
+        name="highlight_priority",
+        prompt="highlight_priority",
+        note="basic",
+        enabled=False  # opt-in: only meaningful when ingestion.extract_annotations is on
+    ))
+
     def items(self):
         """Support for dict-like .items() iteration."""
         return [
             ('key_points', self.key_points),
-            ('cloze_definitions', self.cloze_definitions),  
-            ('figure_based', self.figure_based)
+            ('cloze_definitions', self.cloze_definitions),
+            ('figure_based', self.figure_based),
+            ('highlight_priority', self.highlight_priority),
         ]
-    
+
     def keys(self):
         """Support for dict-like .keys() iteration."""
-        return ['key_points', 'cloze_definitions', 'figure_based']
-    
+        return ['key_points', 'cloze_definitions', 'figure_based', 'highlight_priority']
+
     def __getitem__(self, key):
         """Support for dict-like access."""
         if key == 'key_points':
@@ -242,29 +250,34 @@ class Strategies:
             return self.cloze_definitions
         elif key == 'figure_based':
             return self.figure_based
+        elif key == 'highlight_priority':
+            return self.highlight_priority
         else:
             raise KeyError(key)
-    
+
     def __deepcopy__(self, memo):
         """Custom deepcopy to avoid __dict__ issues."""
         return Strategies(
             key_points=copy.deepcopy(self.key_points, memo),
             cloze_definitions=copy.deepcopy(self.cloze_definitions, memo),
-            figure_based=copy.deepcopy(self.figure_based, memo)
+            figure_based=copy.deepcopy(self.figure_based, memo),
+            highlight_priority=copy.deepcopy(self.highlight_priority, memo),
         )
-    
+
     def __getattribute__(self, name):
         if name == '__dict__':
-            # Return a dict-like view for legacy compatibility  
+            # Return a dict-like view for legacy compatibility
             # Use object.__getattribute__ to avoid recursion
             try:
                 key_points = object.__getattribute__(self, 'key_points')
                 cloze_definitions = object.__getattribute__(self, 'cloze_definitions')
                 figure_based = object.__getattribute__(self, 'figure_based')
+                highlight_priority = object.__getattribute__(self, 'highlight_priority')
                 return {
                     'key_points': key_points,
-                    'cloze_definitions': cloze_definitions,  
-                    'figure_based': figure_based
+                    'cloze_definitions': cloze_definitions,
+                    'figure_based': figure_based,
+                    'highlight_priority': highlight_priority,
                 }
             except AttributeError:
                 # Fallback to regular __dict__ during object construction
@@ -509,11 +522,13 @@ class DocumentConfig:
     # Heuristic suggestions (from scan)
     heuristic_chunking: Optional[Chunking] = None
     heuristic_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
+    heuristic_extract_annotations: Optional[bool] = None
 
     # Explicit overrides (user-defined)
     override_chunking: Optional[Chunking] = None
     override_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
     override_ingestion: Optional[Ingestion] = None
+    override_extract_annotations: Optional[bool] = None
 
     # Processing flags
     enabled: bool = True
@@ -578,12 +593,25 @@ class Documents:
                 _as_plain(doc.override_ingestion)
             )
 
+        # extract_annotations is applied as a single explicit flag rather than
+        # via override_ingestion, since override_ingestion's whole-object merge
+        # would otherwise clobber heuristic_chunking with Ingestion()'s defaults.
+        if doc.heuristic_extract_annotations is not None:
+            eff.pipeline.ingestion.extract_annotations = doc.heuristic_extract_annotations
+        if doc.override_extract_annotations is not None:
+            eff.pipeline.ingestion.extract_annotations = doc.override_extract_annotations
+
         # ---- Strategies ----
         # Convert Strategies object to list for processing, then back to object
         def strategies_to_list(strategies: Strategies) -> List[Strategy]:
             """Convert Strategies dataclass to list for processing."""
-            return [strategies.key_points, strategies.cloze_definitions, strategies.figure_based]
-        
+            return [
+                strategies.key_points,
+                strategies.cloze_definitions,
+                strategies.figure_based,
+                strategies.highlight_priority,
+            ]
+
         def list_to_strategies(strategy_list: List[Strategy]) -> Strategies:
             """Convert list back to Strategies dataclass."""
             result = Strategies()
@@ -594,6 +622,8 @@ class Documents:
                     result.cloze_definitions = strategy
                 elif strategy.name == "figure_based":
                     result.figure_based = strategy
+                elif strategy.name == "highlight_priority":
+                    result.highlight_priority = strategy
             return result
         
         base_list = strategies_to_list(eff.generate.strategies)
