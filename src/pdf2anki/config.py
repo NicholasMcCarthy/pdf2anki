@@ -530,6 +530,12 @@ class DocumentConfig:
     override_ingestion: Optional[Ingestion] = None
     override_extract_annotations: Optional[bool] = None
 
+    # Resolved/overridden workflow (textbook|academic_paper|readwise|generic).
+    # Set by the user to force classification of a specific document; scan-docs
+    # also writes back its resolved value (auto-detected or override-honoring)
+    # here for visibility - see workflow_router.select_workflow().
+    workflow: Optional[str] = None
+
     # Processing flags
     enabled: bool = True
     last_scanned: Optional[str] = None

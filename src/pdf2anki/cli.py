@@ -1,7 +1,7 @@
 """Command-line interface for pdf2anki."""
 
 import shutil
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Optional, List
 import glob
@@ -20,6 +20,7 @@ from .ids import create_id_manager
 from .io import clear_cache, find_markdown_files, load_csv, preview_cards, save_csv
 from .readwise import process_readwise_document
 from .validate import validate_csv
+from .workflow_router import WORKFLOW_TO_DOCUMENT_TYPE, select_workflow
 
 # Import functions used by tests
 from .pdf import PDFProcessor
@@ -291,6 +292,7 @@ def scan_docs(
         results_table.add_column("File", style="cyan")
         results_table.add_column("Pages", justify="right")
         results_table.add_column("Type", style="green")
+        results_table.add_column("Workflow", style="magenta")
         results_table.add_column("TOC", justify="center")
         results_table.add_column("Chapters", justify="center")
         results_table.add_column("2-col", justify="center")
@@ -313,17 +315,23 @@ def scan_docs(
                 # Add to documents config
                 documents_config.add_or_update_document(pdf_path, metadata)
 
-                # Apply heuristic chunking/strategy/annotation-extraction defaults
-                # for the detected document type (research paper vs textbook). Only
-                # do this when the classifier is actually confident (not UNKNOWN):
-                # get_effective_config() treats heuristic_* as taking precedence over
-                # the user's global config.yaml, so writing a heuristic suggestion for
-                # every document - including a bland generic one for UNKNOWN docs -
-                # would silently override explicit user config on any document that
-                # isn't confidently classified as a paper or textbook.
+                # Resolve the workflow (honoring any manual override already set
+                # on this document) and apply heuristic chunking/strategy/
+                # annotation-extraction defaults for it. Only do this when the
+                # resolved workflow isn't GENERIC: get_effective_config() treats
+                # heuristic_* as taking precedence over the user's global
+                # config.yaml, so writing a heuristic suggestion for every
+                # document - including a bland generic one - would silently
+                # override explicit user config on any document that isn't
+                # confidently classified (or manually routed) as a paper or textbook.
                 doc_config = documents_config.documents[Path(pdf_path).name]
-                if metadata.doc_type != DocumentType.UNKNOWN:
-                    defaults = get_heuristic_defaults(metadata)
+                workflow = select_workflow(Path(pdf_path), metadata, override=doc_config.workflow)
+                doc_config.workflow = workflow.value
+
+                effective_doc_type = WORKFLOW_TO_DOCUMENT_TYPE.get(workflow, DocumentType.UNKNOWN)
+                if effective_doc_type != DocumentType.UNKNOWN:
+                    effective_metadata = replace(metadata, doc_type=effective_doc_type)
+                    defaults = get_heuristic_defaults(effective_metadata)
                     if "chunking_mode" in defaults:
                         doc_config.heuristic_chunking = Chunking(
                             mode=defaults["chunking_mode"],
@@ -339,6 +347,7 @@ def scan_docs(
                     Path(pdf_path).name,
                     str(metadata.page_count),
                     metadata.doc_type,
+                    workflow.value,
                     "✓" if metadata.toc_present else "✗",
                     "✓" if metadata.chapters_detected else "✗",
                     "✓" if metadata.two_column_layout else "✗",
