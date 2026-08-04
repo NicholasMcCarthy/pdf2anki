@@ -17,7 +17,7 @@ from .build import build_anki_deck
 from .config import Chunking, Config, DocumentsConfig, DocumentType
 from .heuristics import DocumentAnalyzer, get_heuristic_defaults
 from .ids import create_id_manager
-from .io import clear_cache, find_markdown_files, load_csv, preview_cards, save_csv
+from .io import clear_cache, find_markdown_files, load_csv, merge_cards_into_csv, preview_cards, save_csv
 from .readwise import process_readwise_document
 from .validate import validate_csv
 from .workflow_router import WORKFLOW_TO_DOCUMENT_TYPE, select_workflow
@@ -792,20 +792,13 @@ def generate_readwise(
             card_dict["my_notes"] = ""
             new_rows.append(card_dict)
 
-        existing_rows = []
-        if base_config.output.csv_path.exists():
-            existing_rows = load_csv(base_config.output.csv_path).to_dict("records")
-
-        existing_ids = {row.get("id") for row in existing_rows}
-        merged_rows = existing_rows + [r for r in new_rows if r["id"] not in existing_ids]
-
-        save_csv(merged_rows, base_config.output.csv_path)
+        merge_result = merge_cards_into_csv(new_rows, base_config.output.csv_path)
 
         console.print(Panel.fit(
             f"✅ Readwise generation complete!\n\n"
             f"Files processed: {len(md_files)}\n"
-            f"New cards: {len(new_rows)}\n"
-            f"Total cards in CSV: {len(merged_rows)}\n"
+            f"New cards: {merge_result['added']}\n"
+            f"Total cards in CSV: {merge_result['total']}\n"
             f"CSV: {base_config.output.csv_path}",
             title="Success",
             style="green"
@@ -818,6 +811,68 @@ def generate_readwise(
         if verbose:
             console.print_exception()
         raise typer.Exit(code=1)
+
+
+@app.command()
+def serve(
+    config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+) -> None:
+    """Run the watcher service: watch configured directories for new PDFs/
+    textbooks/Readwise markdown files, classify and process each one, keep
+    the Anki deck up to date, and optionally push to AnkiConnect/Slack.
+
+    This is the entrypoint the Docker service container runs.
+    """
+    import logging as _logging
+
+    from .service import DirectoryWatcher, process_new_file
+    from .service.notify import notify_error, notify_file_processed, notify_startup
+
+    if verbose:
+        _logging.getLogger("pdf2anki").setLevel(_logging.DEBUG)
+    else:
+        _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    config = Config.from_yaml(config_path)
+    webhook_url = config.service.notifications.slack_webhook_url
+
+    console.print("🔭 Starting pdf2anki watcher service...", style="bold blue")
+    watch_dirs = {
+        "pdfs": config.service.watch_dirs.pdfs,
+        "textbooks": config.service.watch_dirs.textbooks,
+        "readwise": config.service.watch_dirs.readwise,
+    }
+    for name, path in watch_dirs.items():
+        console.print(f"  📁 {name}: {path}")
+
+    if config.service.notifications.notify_on_processed:
+        notify_startup(webhook_url, watch_dirs)
+
+    def on_file(path: Path) -> None:
+        console.print(f"📄 New file detected: {path}")
+        try:
+            result = process_new_file(path, config)
+            console.print(
+                f"   ✅ {result['workflow']}: {result['cards_generated']} cards "
+                f"(+{result['cards_added']} new)"
+            )
+            if config.service.notifications.notify_on_processed:
+                notify_file_processed(webhook_url, result)
+        except Exception as e:
+            console.print(f"   ❌ Failed to process {path}: {e}", style="red")
+            if verbose:
+                console.print_exception()
+            if config.service.notifications.notify_on_error:
+                notify_error(webhook_url, str(path), str(e))
+
+    watcher = DirectoryWatcher(
+        directories=[watch_dirs["pdfs"], watch_dirs["textbooks"], watch_dirs["readwise"]],
+        on_file=on_file,
+        debounce_seconds=config.service.debounce_seconds,
+        poll_interval_seconds=config.service.poll_interval_seconds,
+    )
+    watcher.run_forever()
 
 
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:

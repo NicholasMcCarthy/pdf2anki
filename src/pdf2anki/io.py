@@ -224,6 +224,28 @@ def find_pdf_files(paths: List[Path], patterns: List[str], recursive: bool = Tru
     return pdf_files
 
 
+def merge_cards_into_csv(new_cards: List[Dict[str, Any]], csv_path: Path) -> Dict[str, int]:
+    """Merge newly-generated card dicts into an existing cards CSV, deduped by
+    content-hash id, without disturbing cards already accumulated there from
+    other runs/files. Used by both `generate-readwise` and the watcher
+    service's runner, which both need to add to a shared deck incrementally
+    rather than overwrite it (unlike the batch-oriented `generate` command,
+    which processes every configured document in one pass and can safely
+    rebuild the CSV from scratch each time).
+    """
+    existing_rows: List[Dict[str, Any]] = []
+    if Path(csv_path).exists():
+        existing_rows = load_csv(csv_path).to_dict("records")
+
+    existing_ids = {row.get("id") for row in existing_rows}
+    added = [row for row in new_cards if row.get("id") not in existing_ids]
+    merged_rows = existing_rows + added
+
+    save_csv(merged_rows, csv_path)
+
+    return {"added": len(added), "total": len(merged_rows)}
+
+
 def find_markdown_files(paths: List[Path], patterns: Optional[List[str]] = None, recursive: bool = True) -> List[Path]:
     """Find Readwise/markdown export files matching the given patterns."""
     if patterns is None:

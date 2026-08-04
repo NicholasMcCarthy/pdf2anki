@@ -369,6 +369,48 @@ class Telemetry:
 
 
 @dataclass
+class WatchDirs:
+    """Directories the watcher service polls for new input files."""
+    pdfs: Optional[str] = "/data/pdfs"
+    textbooks: Optional[str] = "/data/textbooks"
+    readwise: Optional[str] = "/data/readwise"
+
+
+@dataclass
+class AnkiConnectSettings:
+    """AnkiConnect is the only realistic way to push new cards into AnkiWeb
+    automatically - AnkiWeb has no public upload API. Requires a real Anki
+    desktop instance (with the AnkiConnect add-on) reachable at `url`,
+    already logged into AnkiWeb. Failures here are always non-fatal: the
+    service still writes the local .apkg regardless of whether AnkiConnect
+    is reachable."""
+    enabled: bool = False
+    url: str = "http://host.docker.internal:8765"
+    sync_after_update: bool = True
+    timeout: int = 30
+
+
+@dataclass
+class NotificationSettings:
+    slack_webhook_url: Optional[str] = None  # supports ${ENV_VAR}
+    notify_on_processed: bool = True
+    notify_on_error: bool = True
+
+    def resolve_env(self) -> None:
+        self.slack_webhook_url = _resolve_env_value(self.slack_webhook_url)
+
+
+@dataclass
+class Service:
+    """Config for the `pdf2anki serve` watcher service (see src/pdf2anki/service/)."""
+    watch_dirs: WatchDirs = field(default_factory=WatchDirs)
+    poll_interval_seconds: int = 300  # periodic reconciliation fallback
+    debounce_seconds: float = 5.0
+    ankiconnect: AnkiConnectSettings = field(default_factory=AnkiConnectSettings)
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
+
+
+@dataclass
 class Pipeline:
     ingestion: Ingestion = field(default_factory=Ingestion)
     llm: LLM = field(default_factory=LLM)
@@ -397,6 +439,7 @@ class Config:
     inputs: Inputs = field(default_factory=Inputs)
     pipeline: Pipeline = field(default_factory=Pipeline)
     generate: Generate = field(default_factory=Generate)
+    service: Service = field(default_factory=Service)
 
     # ---------- I/O ----------
     @classmethod
@@ -404,6 +447,7 @@ class Config:
         if not Path(path).exists():
             cfg = cls()
             cfg.pipeline.llm.resolve_env()
+            cfg.service.notifications.resolve_env()
             return cfg
 
         with open(path, "r", encoding="utf-8") as f:
@@ -451,6 +495,7 @@ class Config:
 
         # Resolve ${ENV} just-in-time
         cfg.pipeline.llm.resolve_env()
+        cfg.service.notifications.resolve_env()
         return cfg
 
     def to_yaml(self, path: Union[str, Path]) -> None:

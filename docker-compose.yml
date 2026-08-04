@@ -1,0 +1,64 @@
+# Runs the pdf2anki watcher service: watches mounted directories for new
+# PDFs/textbooks/Readwise markdown exports, classifies and processes each
+# one, and keeps a running Anki deck (.apkg) up to date - see
+# src/pdf2anki/service/ and `pdf2anki serve --help`.
+#
+# Quick start:
+#   cp .env.example .env            # fill in API keys / webhook / paths
+#   cp examples/service_config.example.yaml config.yml   # adjust as needed
+#   docker compose up -d
+#
+# AnkiWeb sync (optional): AnkiWeb has no public upload API, so pushing new
+# cards there automatically requires a real Anki desktop app (with the
+# AnkiConnect add-on) already logged into AnkiWeb, reachable from this
+# container. `extra_hosts` below makes the host reachable at
+# host.docker.internal - point config.yml's service.ankiconnect.url at that
+# and set service.ankiconnect.enabled: true. Without that, the service still
+# writes/updates workspace/deck.apkg locally, which you import into Anki by
+# hand.
+#
+# Multiple decks: to run more than one instance (e.g. separate decks per
+# subject), duplicate the service block below with a different name,
+# container_name, config.yml, workspace volume, and watch directories - see
+# the commented `pdf2anki-second-deck` example at the bottom.
+
+services:
+  pdf2anki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf2anki
+    restart: unless-stopped
+    command: ["serve", "--config", "/home/pdf2anki/config.yml"]
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/home/pdf2anki/config.yml:ro
+      - ${PDF_SYNC_DIR:-./data/pdfs}:/data/pdfs
+      - ${TEXTBOOK_SYNC_DIR:-./data/textbooks}:/data/textbooks
+      - ${READWISE_SYNC_DIR:-./data/readwise}:/data/readwise
+      - ${WORKSPACE_DIR:-./data/workspace}:/home/pdf2anki/workspace
+      - ${TEXTBOOK_CONFIGS_DIR:-./data/textbook-configs}:/data/textbook-configs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Example second instance, e.g. a separate deck for a different subject.
+  # Uncomment and adjust config.yml/volumes/deck name to run it alongside the
+  # primary service.
+  # pdf2anki-second-deck:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: pdf2anki-second-deck
+  #   restart: unless-stopped
+  #   command: ["serve", "--config", "/home/pdf2anki/config.yml"]
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./config-second-deck.yml:/home/pdf2anki/config.yml:ro
+  #     - ${PDF_SYNC_DIR_2:-./data/pdfs-2}:/data/pdfs
+  #     - ${TEXTBOOK_SYNC_DIR_2:-./data/textbooks-2}:/data/textbooks
+  #     - ${READWISE_SYNC_DIR_2:-./data/readwise-2}:/data/readwise
+  #     - ${WORKSPACE_DIR_2:-./data/workspace-2}:/home/pdf2anki/workspace
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"

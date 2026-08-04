@@ -1,0 +1,54 @@
+# Example config.yml for the `pdf2anki serve` watcher service (docker-compose.yml).
+# Copy to config.yml at the repo root (or wherever docker-compose.yml's
+# ./config.yml mount points) and adjust.
+
+project:
+  name: my-pdf2anki-deck
+
+pipeline:
+  llm:
+    provider: openai              # or "anthropic"
+    model: gpt-4-1106-preview     # or e.g. claude-sonnet-5 for anthropic
+    # ${VAR} is resolved from the container's environment (see .env.example).
+    # Point this at whichever provider-specific var you set, or use the
+    # generic ${API_KEY} if you'd rather manage one secret regardless of provider.
+    api_key: ${OPENAI_API_KEY}
+  hallucination:
+    require_citations: true
+    verify_quotes: true
+
+generate:
+  anki:
+    deck_name: My PDF2Anki Deck
+    deck_structure: flat          # flat|chapter|theme|predefined
+  output:
+    workspace: /home/pdf2anki/workspace
+    csv_path: /home/pdf2anki/workspace/cards.csv
+    media_path: /home/pdf2anki/workspace/media
+    apkg_path: /home/pdf2anki/workspace/deck.apkg
+    manifest_path: /home/pdf2anki/workspace/manifest.json
+
+# Watcher-service-specific settings (src/pdf2anki/config.py:Service).
+service:
+  watch_dirs:
+    pdfs: /data/pdfs
+    textbooks: /data/textbooks
+    readwise: /data/readwise
+  poll_interval_seconds: 300      # periodic full reconciliation scan fallback
+  debounce_seconds: 5.0           # wait for a file to stop changing before processing
+
+  # AnkiWeb has no public upload API - AnkiConnect (talking to a real Anki
+  # desktop app already logged into AnkiWeb) is the only realistic way to push
+  # new cards there automatically. Requires Anki + the AnkiConnect add-on
+  # running on the host (or another reachable machine). Leave disabled to
+  # rely on the local .apkg file only (import it into Anki yourself).
+  ankiconnect:
+    enabled: false
+    url: http://host.docker.internal:8765
+    sync_after_update: true
+
+  notifications:
+    # ${SLACK_WEBHOOK_URL} resolved from the container's environment.
+    slack_webhook_url: ${SLACK_WEBHOOK_URL}
+    notify_on_processed: true
+    notify_on_error: true
