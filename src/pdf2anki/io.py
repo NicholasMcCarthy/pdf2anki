@@ -224,6 +224,31 @@ def find_pdf_files(paths: List[Path], patterns: List[str], recursive: bool = Tru
     return pdf_files
 
 
+def find_markdown_files(paths: List[Path], patterns: Optional[List[str]] = None, recursive: bool = True) -> List[Path]:
+    """Find Readwise/markdown export files matching the given patterns."""
+    if patterns is None:
+        patterns = ["*.md", "*.markdown"]
+
+    md_files = []
+
+    for path in paths:
+        path = Path(path)
+
+        if path.is_file() and path.suffix.lower() in (".md", ".markdown"):
+            md_files.append(path)
+        elif path.is_dir():
+            for pattern in patterns:
+                if recursive:
+                    md_files.extend(path.rglob(pattern))
+                else:
+                    md_files.extend(path.glob(pattern))
+
+    md_files = sorted(set(md_files))
+
+    logger.info(f"Found {len(md_files)} markdown files")
+    return md_files
+
+
 def clear_cache() -> int:
     """Clear all caches and return number of entries cleared."""
     cleared = clear_llm_cache()

@@ -1,6 +1,7 @@
 """Command-line interface for pdf2anki."""
 
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, List
 import glob
@@ -15,7 +16,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from .build import build_anki_deck
 from .config import Chunking, Config, DocumentsConfig, DocumentType
 from .heuristics import DocumentAnalyzer, get_heuristic_defaults
-from .io import clear_cache, load_csv, preview_cards
+from .ids import create_id_manager
+from .io import clear_cache, find_markdown_files, load_csv, preview_cards, save_csv
+from .readwise import process_readwise_document
 from .validate import validate_csv
 
 # Import functions used by tests
@@ -717,6 +720,95 @@ def _generate_sample_csv_schema(base_config: Config, note_type_manager=None) -> 
         preview_table.add_row(*[col.strip('"') for col in cols])
     
     console.print(preview_table)
+
+
+@app.command(name="generate-readwise")
+def generate_readwise(
+    path: Path = typer.Option(..., "--path", "-p", help="Markdown file or directory of Readwise/Obsidian exports"),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to configuration file"),
+    max_cards: int = typer.Option(2, "--max-cards", help="Max cards to generate per highlight"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+) -> None:
+    """Generate flashcards from Readwise/Obsidian markdown highlight exports.
+
+    Cards are merged into the same CSV output as `generate` (by content-hash
+    id, so re-running is safe) rather than overwriting it, so PDF- and
+    Readwise-derived cards can accumulate into one deck.
+    """
+    console.print("📚 Generating flashcards from Readwise highlights...", style="bold blue")
+
+    try:
+        base_config = Config.from_yaml(config_path) if config_path and config_path.exists() else Config()
+        base_config.create_workspace()
+
+        md_files = find_markdown_files([path]) if path.is_dir() else [path]
+        if not md_files:
+            console.print(f"❌ No markdown files found at {path}", style="red")
+            raise typer.Exit(code=1)
+
+        console.print(f"📄 Found {len(md_files)} markdown files")
+
+        prompt_manager, _, _ = _get_template_managers()
+        llm_provider = create_llm_provider(base_config.llm)
+        id_manager = create_id_manager(base_config.ids)
+
+        all_cards = []
+        for md_path in md_files:
+            console.print(f"  📄 Processing {md_path.name}...")
+            try:
+                cards = process_readwise_document(
+                    md_path, llm_provider, prompt_manager, max_cards_per_highlight=max_cards
+                )
+                all_cards.extend(cards)
+                console.print(f"     ✅ {len(cards)} cards generated")
+            except Exception as e:
+                console.print(f"     ❌ Failed to process {md_path.name}: {e}", style="red")
+                if verbose:
+                    console.print_exception()
+                continue
+
+        if not all_cards:
+            console.print("⚠️  No cards generated from any Readwise file.", style="yellow")
+            return
+
+        now = datetime.now().isoformat()
+        new_rows = []
+        for card in all_cards:
+            card_dict = asdict(card)
+            card_dict["id"] = id_manager.generate_id(card)
+            card_dict["created_at"] = now
+            card_dict["updated_at"] = now
+            card_dict["deck"] = base_config.anki.deck_name
+            card_dict["longtext"] = ""
+            card_dict["my_notes"] = ""
+            new_rows.append(card_dict)
+
+        existing_rows = []
+        if base_config.output.csv_path.exists():
+            existing_rows = load_csv(base_config.output.csv_path).to_dict("records")
+
+        existing_ids = {row.get("id") for row in existing_rows}
+        merged_rows = existing_rows + [r for r in new_rows if r["id"] not in existing_ids]
+
+        save_csv(merged_rows, base_config.output.csv_path)
+
+        console.print(Panel.fit(
+            f"✅ Readwise generation complete!\n\n"
+            f"Files processed: {len(md_files)}\n"
+            f"New cards: {len(new_rows)}\n"
+            f"Total cards in CSV: {len(merged_rows)}\n"
+            f"CSV: {base_config.output.csv_path}",
+            title="Success",
+            style="green"
+        ))
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"❌ Error during Readwise generation: {e}", style="bold red")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(code=1)
 
 
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:

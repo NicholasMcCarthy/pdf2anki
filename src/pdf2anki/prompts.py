@@ -113,6 +113,15 @@ Guidelines:
 5. Include page citations for reference
 6. If nothing highlighted is flashcard-worthy, return no cards rather than padding""",
 
+    "readwise_highlight": """You are an expert educational content creator specializing in converting saved web highlights (Readwise) into effective Anki flashcards. Your task is to ground each flashcard entirely in a single highlighted passage, using the reader's own note on it (if present) to understand its significance.
+
+Guidelines:
+1. Ground every card in the highlighted text - do not invent facts not present in it
+2. Create clear, specific questions that test the highlighted claim, definition, or fact
+3. Keep answers concise but complete
+4. If a highlight isn't fact-like or specific enough to support a good flashcard, return no cards rather than padding
+5. Do not fabricate page numbers or citations - the source is a URL, not a page""",
+
     "reviewer": """You are an expert educational content reviewer. Your task is to evaluate flashcard quality and suggest improvements. Focus on clarity, accuracy, educational value, and adherence to best practices for spaced repetition learning.
 
 Evaluation criteria:

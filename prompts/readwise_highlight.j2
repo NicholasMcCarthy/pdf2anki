@@ -1,0 +1,36 @@
+You are analyzing a single highlight saved from "{{ pdf_title }}"{% if author %} ({{ author }}){% endif %} - a web article or document the reader highlighted and saved via Readwise.
+
+**Highlighted Text**:
+{{ chunk }}
+
+{% if "[NOTE]" in chunk %}
+Note: a `[NOTE]` line above is the reader's own annotation on this highlight - use it to understand why they saved it and what to emphasize.
+{% endif %}
+
+---
+
+**Task**: Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards grounded entirely in this highlight.
+
+**Requirements**:
+1. Ground every card in the highlighted text (and note, if present) - do not invent facts that aren't here
+2. Prefer a card that tests the specific claim, definition, or fact the highlight captures
+3. If the highlight is too short, vague, or not fact-like enough to support a good flashcard, return an empty "cards" array rather than padding
+4. Keep answers concise but complete
+
+**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+
+```json
+{
+  "cards": [
+    {
+      "front": "Clear, specific question",
+      "back": "Complete answer",
+      "core_concept": "Main concept the highlight captures",
+      "difficulty": "easy|medium|hard",
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+```
+
+Generate the flashcards now:

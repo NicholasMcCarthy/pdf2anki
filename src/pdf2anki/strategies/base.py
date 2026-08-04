@@ -159,7 +159,10 @@ class BaseStrategy(ABC):
                 card.page_start = chunk.start_page
                 card.page_end = chunk.end_page
                 card.section = chunk.section
-                card.ref_citation = f"p. {chunk.start_page}"
+                # Page-based citation is the sensible default for PDF-derived chunks;
+                # a strategy may pre-set ref_citation in parse_cards() instead (e.g.
+                # ReadwiseHighlightStrategy citing a source URL), which wins here.
+                card.ref_citation = card.ref_citation or f"p. {chunk.start_page}"
                 card.llm_model = self.llm_provider.config.model
                 card.strategy = self.name
                 card.template_version = self.config.template_version
