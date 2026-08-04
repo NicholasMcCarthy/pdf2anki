@@ -37,14 +37,19 @@ service:
   poll_interval_seconds: 300      # periodic full reconciliation scan fallback
   debounce_seconds: 5.0           # wait for a file to stop changing before processing
 
-  # AnkiWeb has no public upload API - AnkiConnect (talking to a real Anki
-  # desktop app already logged into AnkiWeb) is the only realistic way to push
-  # new cards there automatically. Requires Anki + the AnkiConnect add-on
-  # running on the host (or another reachable machine). Leave disabled to
-  # rely on the local .apkg file only (import it into Anki yourself).
+  # AnkiWeb has no public upload API - AnkiConnect (talking to a real, running
+  # Anki instance already logged into AnkiWeb) is the only realistic way to
+  # push new cards there automatically. docker-compose.yml bundles a headless
+  # Anki + AnkiConnect container (service name "anki", noVNC GUI on
+  # http://localhost:3000) - url below points at it by its compose service
+  # name. See docker-compose.yml's header comment for the one-time setup
+  # (AnkiWeb login, AnkiConnect bind address) before flipping enabled to true.
+  # Point at your own already-running desktop Anki instead? Use
+  # http://host.docker.internal:8765 (see docker-compose.yml's `extra_hosts`).
+  # Leave disabled to rely on the local .apkg file only (import it by hand).
   ankiconnect:
     enabled: false
-    url: http://host.docker.internal:8765
+    url: http://anki:8765
     sync_after_update: true
 
   notifications:
