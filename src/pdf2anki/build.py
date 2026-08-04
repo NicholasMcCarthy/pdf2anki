@@ -1,23 +1,40 @@
 """Anki deck building system using genanki."""
 
+import hashlib
 import logging
-import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import genanki
 import pandas as pd
 
-from .config import Config # AnkiConfig, Config, DeckStructure
+from .config import Anki, Config # AnkiConfig, Config, DeckStructure
 from .io import load_csv
 
 logger = logging.getLogger(__name__)
 
 
+def _stable_id(seed: str) -> int:
+    """Derive a deterministic genanki model/deck ID from a fixed seed string.
+
+    genanki model/deck ids must be stable across runs for repeated
+    build_anki_deck() calls to be reimport-idempotent (the same note type and
+    deck get updated in place rather than duplicated) - which the watcher
+    service depends on, since it rebuilds the whole .apkg after every new
+    file. random.randrange() (the previous approach) produced a fresh id on
+    every AnkiDeckBuilder construction, defeating that.
+    """
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return (int(digest, 16) % ((1 << 31) - (1 << 30))) + (1 << 30)
+
+
 class AnkiDeckBuilder:
     """Builds Anki decks from CSV data using genanki."""
-    
-    def __init__(self, config: Config):
+
+    def __init__(self, config: "Anki"):
+        # Takes the Anki sub-config directly (see build_anki_deck() below,
+        # which always constructs this as AnkiDeckBuilder(config.anki)) - not
+        # the top-level Config, despite the historical type hint.
         self.config = config
         self.note_types = {}
         self.decks = {}
@@ -30,7 +47,7 @@ class AnkiDeckBuilder:
         
         # Basic note type
         basic_note_type = genanki.Model(
-            model_id=random.randrange(1 << 30, 1 << 31),
+            model_id=_stable_id("pdf2anki-basic-note-type-v1"),
             name='PDF2Anki Basic',
             fields=[
                 {'name': 'Front'},
@@ -130,7 +147,7 @@ class AnkiDeckBuilder:
         
         # Cloze note type
         cloze_note_type = genanki.Model(
-            model_id=random.randrange(1 << 30, 1 << 31),
+            model_id=_stable_id("pdf2anki-cloze-note-type-v1"),
             name='PDF2Anki Cloze',
             fields=[
                 {'name': 'Text'},
@@ -280,51 +297,51 @@ class AnkiDeckBuilder:
         
         decks = {}
         
-        if self.config.anki.deck_structure == "flat":
+        if self.config.deck_structure == "flat":
             # Single flat deck
-            deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+            deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
             deck = genanki.Deck(deck_id, self.config.deck_name)
             decks['main'] = deck
-            
-        elif self.config.anki.deck_structure == "chapter":
+
+        elif self.config.deck_structure == "chapter":
             # Create subdecks by section/chapter
             sections = df['section'].dropna().unique()
-            
+
             for section in sections:
                 if section and str(section).strip():
                     section_name = str(section).strip()
                     deck_name = f"{self.config.deck_name}::{section_name}"
-                    deck_id = random.randrange(1 << 30, 1 << 31)
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
                     deck = genanki.Deck(deck_id, deck_name)
                     decks[section_name] = deck
-            
+
             # Default deck for cards without sections
             if 'main' not in decks:
-                deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
-                
-        elif self.config.anki.deck_structure == "theme":
+
+        elif self.config.deck_structure == "theme":
             # Create subdecks by strategy/theme
             strategies = df['strategy'].dropna().unique()
-            
+
             for strategy in strategies:
                 if strategy and str(strategy).strip():
                     strategy_name = str(strategy).strip().replace('_', ' ').title()
                     deck_name = f"{self.config.deck_name}::{strategy_name}"
-                    deck_id = random.randrange(1 << 30, 1 << 31)
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
                     deck = genanki.Deck(deck_id, deck_name)
                     decks[strategy] = deck
-            
+
             # Default deck
             if 'main' not in decks:
-                deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
-                
+
         else:  # PREDEFINED or fallback
             # Single deck with predefined structure
-            deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+            deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
             deck = genanki.Deck(deck_id, self.config.deck_name)
             decks['main'] = deck
         
@@ -334,12 +351,12 @@ class AnkiDeckBuilder:
     def _get_deck_for_card(self, row: pd.Series, decks: Dict[str, genanki.Deck]) -> genanki.Deck:
         """Get the appropriate deck for a card based on deck structure."""
         
-        if self.config.anki.deck_structure == "chapter":
+        if self.config.deck_structure == "chapter":
             section = row.get('section')
             if section and str(section).strip() in decks:
                 return decks[str(section).strip()]
         
-        elif self.config.anki.deck_structure == "theme":
+        elif self.config.deck_structure == "theme":
             strategy = row.get('strategy')
             if strategy and str(strategy).strip() in decks:
                 return decks[str(strategy).strip()]
