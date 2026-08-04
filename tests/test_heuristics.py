@@ -152,8 +152,9 @@ def test_get_heuristic_defaults():
     )
     
     defaults = get_heuristic_defaults(textbook_metadata)
-    
-    assert defaults["chunking_mode"] == "smart"
+
+    # Textbooks chunk chapter-by-chapter off the PDF's own outline for full coverage.
+    assert defaults["chunking_mode"] == "outline"
     assert defaults["tokens_per_chunk"] == 2500  # Larger for textbooks
     assert "figure_based" in defaults["strategies"]
     

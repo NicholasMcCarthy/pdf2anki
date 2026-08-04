@@ -91,6 +91,8 @@ class TextChunker:
             return self._chunk_by_highlights(pdf_content)
         elif self.config.mode == ChunkingMode.ENTIRE:
             return self._chunk_entire(pdf_content)
+        elif self.config.mode == ChunkingMode.OUTLINE:
+            return self._chunk_by_outline(pdf_content)
         else:
             raise ValueError(f"Unknown chunking mode: {self.config.mode}")
     
@@ -554,6 +556,48 @@ class TextChunker:
         logger.info(f"Created {len(chunks)} highlight-based chunks from {len(annotations)} annotations")
         return chunks
     
+    def _chunk_by_outline(self, pdf_content: Dict) -> List[TextChunk]:
+        """Chunk a textbook using its authoritative PDF outline/TOC (see
+        textbook.extract_outline(), which populates pdf_content["outline"])
+        instead of heuristic heading detection, so every outline section
+        produces at least one chunk - the basis for full-coverage generation.
+
+        Reuses the same section-text extraction and token-bounded splitting as
+        _chunk_by_sections(); the only difference is the section list's source
+        (authoritative TOC vs. detected headings).
+        """
+        outline = pdf_content.get("outline", [])
+        if not outline:
+            logger.info("No outline available for outline-driven chunking, falling back to smart chunking")
+            return self._chunk_smart(pdf_content)
+
+        chunks = []
+        for entry in outline:
+            section = {
+                "title": entry["title"],
+                "start_page": entry["start_page"],
+                "end_page": entry["end_page"],
+            }
+            section_text = self._extract_section_text(pdf_content, section)
+
+            if not section_text.strip():
+                continue
+
+            section_chunks = self._split_large_text(
+                section_text,
+                start_page=section["start_page"],
+                end_page=section["end_page"],
+                section_title=section["title"],
+            )
+            chunks.extend(section_chunks)
+
+        for i, chunk in enumerate(chunks):
+            chunk.chunk_index = i
+            chunk.total_chunks = len(chunks)
+
+        logger.info(f"Created {len(chunks)} chunks using outline-driven strategy ({len(outline)} outline entries)")
+        return chunks
+
     def _chunk_entire(self, pdf_content: Dict) -> List[TextChunk]:
         """Chunk text as entire document with optional trimming and auto-splitting."""
         logger.info("Starting entire document chunking")

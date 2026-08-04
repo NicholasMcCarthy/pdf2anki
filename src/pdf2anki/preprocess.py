@@ -1,5 +1,6 @@
 """Main preprocessing pipeline for converting PDFs to flashcards."""
 
+import json
 import logging
 from dataclasses import asdict
 from datetime import datetime
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .chunking import TextChunker
-from .config import Config
+from .config import ChunkingMode, Config
 from .dedup import create_deduplication_manager
 from .ids import create_id_manager
 from .io import find_pdf_files, save_csv, save_images, save_manifest
@@ -23,6 +24,7 @@ from .strategies import (
 )
 from .strategies.base import FlashcardData
 from .telemetry import create_telemetry_collector
+from .textbook import build_coverage_report, extract_outline
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +240,16 @@ def process_single_pdf(
         ocr_fallback=config.ingestion.ocr_fallback
     )
     
+    # Outline-driven chunking (textbook workflow) needs the PDF's authoritative
+    # TOC/outline threaded through pdf_content, same as annotations are.
+    outline_entries = None
+    if config.ingestion.chunking.mode == ChunkingMode.OUTLINE:
+        outline_entries = extract_outline(pdf_path)
+        pdf_content["outline"] = [asdict(e) for e in outline_entries]
+
     telemetry.end_phase()
     telemetry.start_phase(f"chunking_{pdf_path.name}")
-    
+
     # Chunk the text
     chunks = text_chunker.chunk_document(pdf_content)
     logger.info(f"Created {len(chunks)} chunks from {pdf_path}")
@@ -356,7 +365,25 @@ def process_single_pdf(
         telemetry.end_phase()
     
     logger.info(f"Generated {len(all_cards)} cards from {pdf_path}")
-    
+
+    # Full-coverage check for the textbook workflow: report which outline
+    # sections got zero cards rather than letting gaps pass silently.
+    if outline_entries:
+        coverage = build_coverage_report(outline_entries, all_cards)
+        coverage_path = Path(config.output.workspace) / f"{pdf_path.stem}_coverage.json"
+        try:
+            coverage_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(coverage_path, "w", encoding="utf-8") as f:
+                json.dump(coverage, f, indent=2, ensure_ascii=False)
+            logger.info(
+                f"Coverage: {coverage['covered_sections']}/{coverage['total_sections']} sections "
+                f"({coverage['coverage_ratio']:.0%}) - report at {coverage_path}"
+            )
+            if coverage["uncovered_sections"]:
+                logger.warning(f"Sections with no cards: {coverage['uncovered_sections']}")
+        except Exception as e:
+            logger.warning(f"Failed to save coverage report: {e}")
+
     return all_cards, pdf_content.get("images", [])
 
 

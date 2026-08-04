@@ -221,9 +221,12 @@ def get_heuristic_defaults(metadata: DocumentMetadata) -> Dict[str, any]:
         defaults["strategies"] = ["highlight_priority", "key_points", "cloze_definitions"]
         defaults["extract_annotations"] = True
     elif metadata.doc_type == DocumentType.TEXTBOOK:
-        defaults["chunking_mode"] = "smart"
+        # Textbooks: chunk chapter-by-chapter off the PDF's own TOC/outline for full
+        # coverage (falls back to smart chunking when the book has no embedded TOC
+        # and no detectable headings - see chunking._chunk_by_outline).
+        defaults["chunking_mode"] = "outline"
         defaults["tokens_per_chunk"] = 2500  # Larger chunks for textbooks
-        defaults["strategies"] = ["key_points", "figure_based"]
+        defaults["strategies"] = ["key_points", "figure_based", "cloze_definitions"]
     else:
         defaults["chunking_mode"] = "pages"
         defaults["tokens_per_chunk"] = 2000

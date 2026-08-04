@@ -1,0 +1,38 @@
+# Default textbook processing profile.
+#
+# This is the fallback template used for any textbook that doesn't have its
+# own instructions.yml. To customize processing for one specific book, copy
+# this file to instructions.yml and place it next to that book's PDF (e.g. in
+# its subdirectory of the mounted textbooks/ directory) - only the fields you
+# want to change need to be present, everything else inherits from here.
+#
+# See src/pdf2anki/textbook.py:load_textbook_profile() for the merge logic
+# (per-book instructions.yml deep-merged over this file, deep-merged over the
+# TextbookProfile dataclass defaults).
+
+chunking:
+  mode: outline          # chapter/section-bounded chunking off the PDF's own TOC
+  tokens_per_chunk: 2500  # target size per chunk; raise for denser/technical books
+  max_chunk_tokens: 4000  # hard ceiling before a section gets split further
+  overlap_tokens: 200
+  respect_page_bounds: true
+  min_chunk_tokens: 100
+  enable_trimming: true
+  token_budget: 8000
+
+strategies:
+  - key_points
+  - figure_based
+  - cloze_definitions
+
+# Minimum/maximum cards generated per outline section - used for the
+# full-coverage check (see textbook.build_coverage_report()); sections that
+# land below min_cards_per_section are flagged in the coverage report.
+min_cards_per_section: 1
+max_cards_per_section: 8
+
+# Leave unset to use the deck name from the main pipeline config; set here to
+# give this book (or all books, if left in the default) its own deck.
+deck_name: null
+
+extra_tags: []

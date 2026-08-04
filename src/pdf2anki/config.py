@@ -704,6 +704,7 @@ class ChunkingMode:
     FIGURES = "figures"
     HIGHLIGHTS = "highlights"
     ENTIRE = "entire"
+    OUTLINE = "outline"
 
 # --------------------------- usage example ---------------------------
 # cfg = Config.from_yaml("config.yaml")
