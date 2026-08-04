@@ -22,6 +22,7 @@ from .validate import validate_csv
 from .pdf import PDFProcessor
 from .chunking import TextChunker
 from .llm import create_llm_provider
+from .preprocess import process_single_pdf
 from .templates import get_note_type_manager, NoteTypeManager, PromptManager
 
 app = typer.Typer(
@@ -313,7 +314,7 @@ def scan_docs(
                 results_table.add_row(
                     Path(pdf_path).name,
                     str(metadata.page_count),
-                    metadata.doc_type.value,
+                    metadata.doc_type,
                     "✓" if metadata.toc_present else "✗",
                     "✓" if metadata.chapters_detected else "✗",
                     "✓" if metadata.two_column_layout else "✗",
@@ -333,7 +334,7 @@ def scan_docs(
         doc_types = {}
         for doc_config in documents_config.documents.values():
             if doc_config.metadata:
-                doc_type = doc_config.metadata.doc_type.value
+                doc_type = doc_config.metadata.doc_type
                 doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
         
         summary_lines = [
@@ -447,7 +448,7 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
         
         metadata_table.add_row("File Path", doc_config.file_path)
         metadata_table.add_row("Pages", str(doc_config.metadata.page_count))
-        metadata_table.add_row("Document Type", doc_config.metadata.doc_type.value)
+        metadata_table.add_row("Document Type", doc_config.metadata.doc_type)
         metadata_table.add_row("Has TOC", "✓" if doc_config.metadata.toc_present else "✗")
         metadata_table.add_row("Has DOI", "✓" if doc_config.metadata.has_doi else "✗")
         
@@ -455,7 +456,7 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
         
         # Show effective configuration
         console.print("⚙️  Effective Configuration:", style="yellow")
-        console.print(f"  Chunking: {effective_config.ingestion.chunking.mode.value}")
+        console.print(f"  Chunking: {effective_config.ingestion.chunking.mode}")
         console.print(f"  Tokens per chunk: {effective_config.ingestion.chunking.tokens_per_chunk}")
         console.print(f"  Enabled strategies: {list(effective_config.strategies.__dict__.keys())[:3]}...")  # TODO: Show actual enabled strategies
         
@@ -698,17 +699,102 @@ def _generate_sample_csv_schema(base_config: Config, note_type_manager=None) -> 
 
 
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:
-    """Run full generation process."""
+    """Run full generation process.
+
+    Mirrors preprocess.preprocess_pdf()'s orchestration, but drives it per-document
+    using documents.yaml's layered effective config (base -> heuristic -> override)
+    instead of a single global config, since each document may have its own chunking
+    mode/strategy list.
+    """
     console.print("⚡ Running full generation...", style="bold green")
-    
-    # TODO: Implement full generation orchestration
-    # This should:
-    # 1. Use documents.yaml layering for each PDF
-    # 2. Process by chunk and apply strategies in order
-    # 3. Persist CSV/media/manifest to workspace/
-    
-    console.print("  [Full generation not yet implemented]")
-    console.print("  [Would orchestrate generation using documents.yaml configuration]")
+
+    from .dedup import create_deduplication_manager
+    from .ids import create_id_manager
+    from .llm import create_llm_provider
+    from .preprocess import finalize_generation
+    from .rag import create_rag_manager
+    from .telemetry import create_telemetry_collector
+
+    base_config.create_workspace()
+
+    telemetry = create_telemetry_collector(base_config.telemetry)
+    telemetry.start_phase("initialization")
+
+    llm_provider = create_llm_provider(base_config.llm)
+    if prompt_manager is None:
+        from .prompts import create_prompt_manager
+        prompt_manager = create_prompt_manager()
+    id_manager = create_id_manager(base_config.ids)
+    dedup_manager = create_deduplication_manager(base_config.deduplication)
+    rag_manager = create_rag_manager(base_config.rag)
+
+    if base_config.ids.strategy == "persistent":
+        id_manager.load_persistent_ids(base_config.output.csv_path)
+
+    telemetry.end_phase()
+
+    all_cards = []
+    all_images = []
+    processed_files: List[Path] = []
+
+    for doc_key, doc_config in documents.items():
+        pdf_path = Path(doc_config.file_path)
+        console.print(f"  📄 Processing {doc_key}...")
+
+        try:
+            effective_config = documents_config.get_effective_config(doc_key, base_config)
+            text_chunker = TextChunker(effective_config.ingestion.chunking, effective_config.llm.model)
+
+            cards, images = process_single_pdf(
+                pdf_path=pdf_path,
+                config=effective_config,
+                llm_provider=llm_provider,
+                prompt_manager=prompt_manager,
+                text_chunker=text_chunker,
+                id_manager=id_manager,
+                dedup_manager=dedup_manager,
+                rag_manager=rag_manager,
+                telemetry=telemetry,
+            )
+
+            all_cards.extend(cards)
+            all_images.extend(images)
+            processed_files.append(pdf_path)
+            telemetry.record_pdf_processed()
+            console.print(f"     ✅ {len(cards)} cards generated")
+
+        except Exception as e:
+            console.print(f"     ❌ Failed to process {doc_key}: {e}", style="red")
+            if verbose:
+                console.print_exception()
+            telemetry.record_error("pdf_processing_error")
+            continue
+
+    if not processed_files:
+        console.print("❌ No documents were successfully processed.", style="red")
+        raise typer.Exit(code=1)
+
+    result = finalize_generation(
+        config=base_config,
+        all_cards=all_cards,
+        all_images=all_images,
+        dedup_manager=dedup_manager,
+        id_manager=id_manager,
+        rag_manager=rag_manager,
+        telemetry=telemetry,
+        source_files=processed_files,
+    )
+
+    console.print(Panel.fit(
+        f"✅ Generation complete!\n\n"
+        f"Documents processed: {result['processed_pdfs']}\n"
+        f"Cards generated: {result['total_cards']}\n"
+        f"Images saved: {result['images_saved']}\n"
+        f"CSV: {result['csv_path']}\n"
+        f"Manifest: {result['manifest_path']}",
+        title="Success",
+        style="green"
+    ))
 
 
 @app.command()

@@ -76,10 +76,15 @@ def _dataclass_from_dict(dc_type, data: Dict[str, Any]):
         if is_dataclass(field_type) and isinstance(raw, dict):
             kwargs[key] = _dataclass_from_dict(field_type, raw)
 
+        elif field_type is Path:
+            kwargs[key] = Path(raw) if isinstance(raw, str) else raw
+
         elif origin is Union and len(args) == 2 and type(None) in args:
             inner = args[0] if args[1] is type(None) else args[1]
             if is_dataclass(inner) and isinstance(raw, dict):
                 kwargs[key] = _dataclass_from_dict(inner, raw)
+            elif inner is Path:
+                kwargs[key] = Path(raw) if isinstance(raw, str) else raw
             else:
                 kwargs[key] = raw
 
@@ -459,6 +464,8 @@ class Config:
     def hallucination(self) -> Hallucination: return self.pipeline.hallucination
     @property
     def review(self) -> Review: return self.pipeline.review
+    @property
+    def telemetry(self) -> Telemetry: return self.pipeline.telemetry
     @property
     def tags(self) -> Tags: return self.generate.tags
     @property

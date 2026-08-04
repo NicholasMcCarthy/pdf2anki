@@ -1,6 +1,7 @@
 """Main preprocessing pipeline for converting PDFs to flashcards."""
 
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -46,7 +47,7 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
     rag_manager = create_rag_manager(config.rag)
     
     # Load existing persistent IDs if using persistent strategy
-    if config.ids.strategy.value == "persistent":
+    if config.ids.strategy == "persistent":
         id_manager.load_persistent_ids(config.output.csv_path)
     
     telemetry.end_phase()
@@ -92,64 +93,93 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
             telemetry.record_error("pdf_processing_error")
             continue
     
+    return finalize_generation(
+        config=config,
+        all_cards=all_cards,
+        all_images=all_images,
+        dedup_manager=dedup_manager,
+        id_manager=id_manager,
+        rag_manager=rag_manager,
+        telemetry=telemetry,
+        source_files=pdf_files,
+    )
+
+
+def finalize_generation(
+    config: Config,
+    all_cards: List[FlashcardData],
+    all_images: List[Dict[str, Any]],
+    dedup_manager,
+    id_manager,
+    rag_manager,
+    telemetry,
+    source_files: List[Path],
+) -> Dict[str, Any]:
+    """Deduplicate, assign IDs, save CSV/media/manifest, and return a run summary.
+
+    Shared by preprocess_pdf() (single global config, glob-discovered PDFs) and any
+    caller that instead drives process_single_pdf() itself per-document with its own
+    effective config (e.g. documents.yaml-driven generation in cli.py), since both
+    need identical finishing steps.
+    """
     telemetry.start_phase("finalization")
-    
+
     # Apply global deduplication
     logger.info(f"Applying global deduplication to {len(all_cards)} cards")
     all_cards = dedup_manager.deduplicate_cards(all_cards)
-    
+
     # Save images
     saved_images = []
     if all_images:
         saved_images = save_images(all_images, config.output.media_path)
-    
+
     # Convert cards to dictionaries for CSV
     cards_data = []
     for card in all_cards:
-        card_dict = card.dict()
-        
+        card_dict = asdict(card)
+
         # Generate ID
         card_dict["id"] = id_manager.generate_id(card)
-        
+
         # Add timestamps
         now = datetime.now().isoformat()
         card_dict["created_at"] = now
         card_dict["updated_at"] = now
-        
+
         # Set deck name
         card_dict["deck"] = config.anki.deck_name
-        
+
         # Add media references if relevant
         card_media = []
         # TODO: Link images to cards based on page ranges
         card_dict["media"] = card_media
-        
+
         # Add additional metadata
         card_dict["longtext"] = ""  # For future use
         card_dict["my_notes"] = ""  # For user annotations
-        
+
         cards_data.append(card_dict)
-    
+
     # Save CSV
     save_csv(cards_data, config.output.csv_path)
-    
+
     # Update persistent index
     dedup_manager.add_to_persistent_index(all_cards)
     if config.deduplication.index_path:
         dedup_manager.save_persistent_index(Path(config.deduplication.index_path))
-    
+
     # Save RAG index
     if config.rag.index_path:
         rag_manager.save_index(Path(config.rag.index_path))
-    
+
     telemetry.end_phase()
-    
+
     # Create manifest
     manifest_data = {
-        "project": config.project.dict(),
+        "project": asdict(config.project),
         "processing": {
-            "pdf_files": [str(p) for p in pdf_files],
-            "total_pdfs": len(pdf_files),
+            "pdf_files": [str(p) for p in source_files],
+            "total_pdfs": len(source_files),
             "total_cards": len(all_cards),
             "total_images": len(saved_images),
             "strategies_used": list(set(card.strategy for card in all_cards)),
@@ -161,22 +191,22 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
         },
         **telemetry.get_manifest_data(config.llm.model)
     }
-    
+
     save_manifest(manifest_data, config.output.manifest_path)
-    
+
     # Log summary
     telemetry.log_summary()
-    
+
     result = {
         "total_cards": len(all_cards),
-        "processed_pdfs": len(pdf_files),
+        "processed_pdfs": len(source_files),
         "csv_path": config.output.csv_path,
         "media_path": config.output.media_path,
         "manifest_path": config.output.manifest_path,
         "images_saved": len(saved_images),
     }
-    
-    logger.info(f"Preprocessing complete: {len(all_cards)} cards generated from {len(pdf_files)} PDFs")
+
+    logger.info(f"Preprocessing complete: {len(all_cards)} cards generated from {len(source_files)} PDFs")
     return result
 
 
@@ -336,7 +366,7 @@ def apply_hallucination_checks(
         # Check citations
         if hallucination_config.require_citations:
             if not card.page_citation or not card.ref_citation:
-                logger.debug(f"Card missing citation: {card.dict()}")
+                logger.debug(f"Card missing citation: {asdict(card)}")
                 is_valid = False
         
         # Verify quotes (basic implementation)

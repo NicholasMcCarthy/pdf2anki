@@ -256,7 +256,7 @@ class DeduplicationManager:
             "enabled": self.config.enabled,
             "fuzzy_threshold": self.config.fuzzy_threshold,
             "embedding_threshold": self.config.embedding_threshold,
-            "policy": self.config.policy.value,
+            "policy": self.config.policy,
             "persistent_index_size": len(self.persistent_index),
             "embeddings_cached": len(self.embeddings_cache),
         }

@@ -3,12 +3,14 @@
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_community.cache import SQLiteCache
 from langchain.globals import set_llm_cache
 from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
 
 from .config import Config, LLMConfig
@@ -46,6 +48,7 @@ class LLMProvider:
         
         # Set up caching
         cache_path = ".llm_cache/langchain.db"
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
         set_llm_cache(SQLiteCache(database_path=cache_path))
         
         # Initialize the LLM
@@ -53,7 +56,7 @@ class LLMProvider:
     
     def _initialize_llm(self):
         """Initialize the LLM instance."""
-        if self.config.provider.value == "openai":
+        if self.config.provider == "openai":
             return ChatOpenAI(
                 model=self.config.model,
                 temperature=self.config.temperature,
@@ -63,6 +66,17 @@ class LLMProvider:
                 request_timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
                 model_kwargs={"seed": self.config.seed} if self.config.seed else {},
+            )
+        elif self.config.provider == "anthropic":
+            # Anthropic requires an explicit max_tokens (unlike OpenAI, None isn't accepted).
+            return ChatAnthropic(
+                model=self.config.model,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens or 4096,
+                anthropic_api_key=self.config.api_key,
+                anthropic_api_url=self.config.base_url,
+                timeout=self.config.timeout,
+                max_retries=self.config.max_retries,
             )
         else:
             raise ValueError(f"Unsupported provider: {self.config.provider}")
@@ -82,32 +96,44 @@ class LLMProvider:
             messages.append(("system", system_prompt))
         messages.append(("human", prompt))
         
-        # Configure for JSON mode if requested
+        # Configure for JSON mode if requested. response_format={"type": "json_object"}
+        # is an OpenAI-specific feature; other providers rely on prompt instructions
+        # plus the parse-and-retry loop below.
         model_kwargs = {}
-        if json_mode and "gpt" in self.config.model.lower():
+        if json_mode and self.config.provider == "openai" and "gpt" in self.config.model.lower():
             model_kwargs["response_format"] = {"type": "json_object"}
-        
+
         for attempt in range(max_retries + 1):
             try:
-                with get_openai_callback() as cb:
-                    # Check if this is a cache hit by calling without callback first
-                    test_response = self.llm.invoke(messages, **model_kwargs)
-                    was_cached = cb.total_tokens == 0
-                    
-                    if not was_cached:
-                        # Real API call
-                        response = self.llm.invoke(messages, **model_kwargs)
-                        tokens_used = cb.total_tokens
-                        cost = cb.total_cost
-                    else:
-                        response = test_response
-                        tokens_used = 0
-                        cost = 0.0
-                        self.cache_hits += 1
-                    
+                if self.config.provider == "openai":
+                    with get_openai_callback() as cb:
+                        # Check if this is a cache hit by calling without callback first
+                        test_response = self.llm.invoke(messages, **model_kwargs)
+                        was_cached = cb.total_tokens == 0
+
+                        if not was_cached:
+                            # Real API call
+                            response = self.llm.invoke(messages, **model_kwargs)
+                            tokens_used = cb.total_tokens
+                            cost = cb.total_cost
+                        else:
+                            response = test_response
+                            tokens_used = 0
+                            cost = 0.0
+                            self.cache_hits += 1
+
+                        self.api_calls += 1
+                        self.total_tokens += tokens_used
+                        self.total_cost += cost
+                else:
+                    # get_openai_callback only instruments OpenAI calls, so for other
+                    # providers (e.g. Anthropic) skip the cache-hit heuristic rather than
+                    # report misleading zero-token/zero-cost "cache hits" for real calls.
+                    response = self.llm.invoke(messages, **model_kwargs)
+                    was_cached = False
+                    tokens_used = 0
+                    cost = 0.0
                     self.api_calls += 1
-                    self.total_tokens += tokens_used
-                    self.total_cost += cost
                 
                 # Validate JSON if requested
                 if json_mode:
@@ -242,6 +268,30 @@ class ModelRegistry:
             "input_cost_per_1k": 0.001,
             "output_cost_per_1k": 0.002,
             "supports_json": True,
+            "supports_seed": False,
+        },
+        "claude-opus-5": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.015,
+            "output_cost_per_1k": 0.075,
+            "supports_json": False,
+            "supports_seed": False,
+        },
+        "claude-sonnet-5": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.003,
+            "output_cost_per_1k": 0.015,
+            "supports_json": False,
+            "supports_seed": False,
+        },
+        "claude-haiku-4-5-20251001": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.001,
+            "output_cost_per_1k": 0.005,
+            "supports_json": False,
             "supports_seed": False,
         },
     }

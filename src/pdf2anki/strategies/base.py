@@ -3,7 +3,7 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..chunking import TextChunk
@@ -218,7 +218,7 @@ class BaseStrategy(ABC):
                 import re
                 key = re.sub(r'\{\{c\d+::(.*?)\}\}', r'\1', card.cloze_text).lower().strip()
             else:
-                key = str(card.dict())
+                key = str(asdict(card))
             
             if key not in seen_fronts:
                 seen_fronts.add(key)
