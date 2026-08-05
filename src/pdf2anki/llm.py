@@ -91,6 +91,7 @@ class LLMProvider:
                 anthropic_api_url=self.config.base_url,
                 timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
+                cache=False,  # Avoid caching empty/failed Anthropic responses
                 **temperature_kwargs,
             )
         else:

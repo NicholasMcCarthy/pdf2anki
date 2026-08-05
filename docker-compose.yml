@@ -60,7 +60,7 @@ services:
     volumes:
       - ${ANKI_DATA_DIR:-./data/anki}:/config
     ports:
-      - "3000:3000"   # noVNC browser access to the Anki GUI (one-time setup, see above)
+      - "3900:3000"   # noVNC browser access to the Anki GUI (one-time setup, see above)
       - "8765:8765"   # AnkiConnect API
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8765"]
