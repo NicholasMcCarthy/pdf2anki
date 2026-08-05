@@ -6,25 +6,45 @@ You are analyzing a single highlight saved from "{{ pdf_title }}"{% if author %}
 {% if "[NOTE]" in chunk %}
 Note: a `[NOTE]` line above is the reader's own annotation on this highlight - use it to understand why they saved it and what to emphasize.
 {% endif %}
+{% if other_highlights %}
+
+**Other highlights the reader saved from this same article** (context only - these help you understand the surrounding argument/narrative so you can write a better-informed card, but do not create cards purely from them; every card must still be grounded in the highlight above):
+{{ other_highlights }}
+{% endif %}
 
 ---
 
-**Task**: Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards grounded entirely in this highlight.
+**Task**: Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards grounded in this highlight.
 
 **Requirements**:
-1. Ground every card in the highlighted text (and note, if present) - do not invent facts that aren't here
-2. Prefer a card that tests the specific claim, definition, or fact the highlight captures
-3. If the highlight is too short, vague, or not fact-like enough to support a good flashcard, return an empty "cards" array rather than padding
-4. Keep answers concise but complete
+1. The core claim, definition, or fact each card tests must come from the highlighted text (and note, if present) - do not test something that isn't actually in it
+2. You may draw on your own general background knowledge to add brief clarifying context (e.g. spelling out an acronym, naming the broader field a term belongs to) - but keep this light, and never let it replace or override what the highlight actually says
+3. Use the other highlights (if given above) only to understand context - not as source material for a card
+4. Prefer a card that tests the specific claim, definition, or fact the highlight captures
+5. If the highlight is too short, vague, or not fact-like enough to support a good flashcard, return an empty "cards" array rather than padding
+6. Keep answers concise but complete
 
-**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+**Choosing Basic vs. Cloze**: For each card, decide which format tests the material better and set `"card_type"` accordingly:
+- Use `"cloze"` for a self-contained definition, key term, or precise fact that reads naturally as a sentence with one to three blanks.
+- Use `"basic"` for anything that needs a real question - a claim, comparison, or "why"/"how" the highlight is making a point.
+
+**Output Format**: Respond with valid JSON containing an array of flashcard objects. Basic cards use `front`/`back`; cloze cards use `cloze_text`/`extra` instead - include only the fields for the chosen `card_type`:
 
 ```json
 {
   "cards": [
     {
+      "card_type": "basic",
       "front": "Clear, specific question",
       "back": "Complete answer",
+      "core_concept": "Main concept the highlight captures",
+      "difficulty": "easy|medium|hard",
+      "tags": ["tag1", "tag2"]
+    },
+    {
+      "card_type": "cloze",
+      "cloze_text": {% raw %}"Text with {{c1::a cloze deletion}} in it"{% endraw %},
+      "extra": "Additional context or explanation",
       "core_concept": "Main concept the highlight captures",
       "difficulty": "easy|medium|hard",
       "tags": ["tag1", "tag2"]

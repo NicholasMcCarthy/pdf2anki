@@ -3,6 +3,7 @@
 import hashlib
 import io
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,58 @@ import fitz  # PyMuPDF
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+_ABSTRACT_HEADING_RE = re.compile(r"^\s*abstract\s*:?\s*$", re.IGNORECASE)
+_ABSTRACT_INLINE_RE = re.compile(r"^\s*abstract[\s:.—-]+(?=\S)", re.IGNORECASE)
+_ABSTRACT_END_RE = re.compile(
+    r"^\s*(1\.?\s*)?(introduction|keywords|index terms|1\s+introduction)\b", re.IGNORECASE
+)
+
+
+def extract_abstract_text(pages_data: List[Dict], max_chars: int = 2500) -> Optional[str]:
+    """Best-effort extraction of a research paper's abstract text from its
+    first two pages, for use as always-included context in prompts (a paper's
+    core contribution/thesis is often stated in the abstract even when the
+    reader didn't highlight it directly - see the highlight_priority strategy).
+
+    Looks for a standalone "Abstract" heading (or an inline "Abstract: ..."
+    lead-in) and captures text up to the next recognized section heading
+    (Introduction/Keywords), capped at max_chars. Returns None if no abstract
+    heading is found - this is heuristic, not authoritative extraction.
+    """
+    text = "\n".join(p.get("raw_text", "") for p in pages_data[:2])
+    lines = text.split("\n")
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if _ABSTRACT_HEADING_RE.match(line):
+            start_idx = i + 1
+            break
+        if _ABSTRACT_INLINE_RE.match(line):
+            start_idx = i
+            lines[i] = _ABSTRACT_INLINE_RE.sub("", line)
+            break
+
+    if start_idx is None:
+        return None
+
+    collected: List[str] = []
+    total_len = 0
+    for line in lines[start_idx:]:
+        if _ABSTRACT_END_RE.match(line.strip()):
+            break
+        collected.append(line)
+        total_len += len(line)
+        if total_len > max_chars:
+            break
+
+    abstract = "\n".join(collected).strip()
+    if len(abstract) > max_chars:
+        # A single very long line (no internal newlines) can blow past max_chars
+        # before the per-line check above even runs once - truncate the final
+        # joined text directly rather than relying solely on line-level cutoff.
+        abstract = abstract[:max_chars].rstrip() + "..."
+    return abstract or None
 
 
 class PDFDocument:
@@ -471,9 +524,17 @@ def extract_pdf_content(
         if ocr_fallback and not any(page["raw_text"].strip() for page in pages_data):
             logger.warning("OCR fallback requested but not implemented yet")
 
+        # Copy rather than mutate pdf_doc.metadata directly - it's the same dict
+        # object PDFDocument._extract_metadata() built, and other callers may
+        # hold a reference to it.
+        metadata = dict(pdf_doc.metadata)
+        abstract = extract_abstract_text(pages_data)
+        if abstract:
+            metadata["abstract"] = abstract
+
         content = {
             "path": pdf_path,
-            "metadata": pdf_doc.metadata,
+            "metadata": metadata,
             "page_count": pdf_doc.page_count,
             "pages": pages_data,
             "images": images,

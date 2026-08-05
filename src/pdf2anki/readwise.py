@@ -177,6 +177,29 @@ def _parse_highlights(body: str) -> List[ReadwiseHighlight]:
     return highlights
 
 
+def _build_other_highlights_context(doc: ReadwiseDocument, exclude_index: int, max_chars: int = 1500) -> str:
+    """Join the OTHER highlights in this document (excluding the one currently
+    being turned into cards) into a short bulleted list, for use as background
+    context in the per-highlight prompt - see process_readwise_document(). This
+    lets the LLM understand the surrounding argument/narrative of a multi-highlight
+    article without grounding cards in anything that wasn't itself highlighted.
+    """
+    parts: List[str] = []
+    total_len = 0
+    for i, highlight in enumerate(doc.highlights):
+        if i == exclude_index:
+            continue
+        snippet = highlight.text.strip().replace("\n", " ")
+        if len(snippet) > 300:
+            snippet = snippet[:300].rstrip() + "..."
+        line = f"- {snippet}"
+        if total_len + len(line) > max_chars:
+            break
+        parts.append(line)
+        total_len += len(line)
+    return "\n".join(parts)
+
+
 def readwise_document_to_chunks(doc: ReadwiseDocument) -> List[TextChunk]:
     """Turn each highlight into its own chunk so per-highlight metadata (note)
     survives into card generation - each highlight is treated as its own
@@ -238,8 +261,11 @@ def process_readwise_document(
     }
 
     all_cards: List[FlashcardData] = []
-    for chunk in chunks:
-        cards = strategy.generate_cards(chunk, pdf_metadata, max_cards=max_cards_per_highlight)
+    for i, chunk in enumerate(chunks):
+        chunk_metadata = dict(pdf_metadata)
+        if len(doc.highlights) > 1:
+            chunk_metadata["other_highlights"] = _build_other_highlights_context(doc, exclude_index=i)
+        cards = strategy.generate_cards(chunk, chunk_metadata, max_cards=max_cards_per_highlight)
         all_cards.extend(strategy.deduplicate_cards(cards))
 
     logger.info(f"Generated {len(all_cards)} cards from {len(chunks)} highlights in {path}")

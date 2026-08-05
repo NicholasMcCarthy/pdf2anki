@@ -131,6 +131,129 @@ def test_strategy_cites_source_url_not_page_number():
     assert 'href="https://example.com/article"' in cards[0].extra
 
 
+def test_strategy_validate_response_accepts_cloze_card():
+    strategy = _mock_strategy()
+    response = {"cards": [{"card_type": "cloze", "cloze_text": "Photosynthesis occurs in the {{c1::chloroplasts}}."}]}
+    assert strategy.validate_response(response) is True
+
+
+def test_strategy_validate_response_rejects_malformed_cloze():
+    strategy = _mock_strategy()
+    response = {"cards": [{"card_type": "cloze", "cloze_text": "no markers"}]}
+    assert strategy.validate_response(response) is False
+
+
+def test_strategy_parses_mixed_basic_and_cloze_cards():
+    strategy = _mock_strategy()
+
+    from pdf2anki.chunking import TextChunk
+    chunk = TextChunk(text="Plants convert light into chemical energy.", start_page=0, end_page=0)
+    pdf_metadata = {"title": "Photosynthesis Basics", "source_url": "https://example.com/article"}
+
+    response_data = {
+        "cards": [
+            {"card_type": "basic", "front": "Q1", "back": "A1", "core_concept": "X"},
+            {"card_type": "cloze", "cloze_text": "Chlorophyll captures {{c1::light energy}}.",
+             "extra": "some context", "core_concept": "Y"},
+        ]
+    }
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata)
+
+    assert len(cards) == 2
+    basic, cloze = cards
+    assert basic.note_type == "Basic"
+    assert cloze.note_type == "Cloze"
+    assert cloze.cloze_text == "Chlorophyll captures {{c1::light energy}}."
+    # Both still cite the source URL and get the source-link markup folded into extra.
+    assert basic.ref_citation == "https://example.com/article"
+    assert cloze.ref_citation == "https://example.com/article"
+    assert "some context" in cloze.extra
+    assert 'href="https://example.com/article"' in cloze.extra
+
+
+def test_strategy_defaults_to_basic_without_card_type():
+    strategy = _mock_strategy()
+
+    from pdf2anki.chunking import TextChunk
+    chunk = TextChunk(text="Some highlight.", start_page=0, end_page=0)
+
+    response_data = {"cards": [{"front": "Q1", "back": "A1", "core_concept": "X"}]}
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "T"})
+
+    assert cards[0].note_type == "Basic"
+
+
+def test_process_readwise_document_threads_other_highlights_context(multi_highlight_md):
+    """A multi-highlight document should give each highlight's prompt call the
+    OTHER highlights as context, excluding its own text from that list."""
+    captured_prompts = []
+
+    def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
+        captured_prompts.append(prompt)
+        payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}
+        return LLMResponse(
+            content=json.dumps(payload), model=self.config.model, tokens_used=1,
+            cost_estimate=0.0, cached=False, response_time=0.0,
+        )
+
+    with patch("pdf2anki.llm.LLMProvider.generate", new=fake_generate):
+        from pdf2anki.llm import create_llm_provider
+        from pdf2anki.config import LLM as LLMConfig
+
+        llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
+        process_readwise_document(multi_highlight_md, llm_provider, create_prompt_manager())
+
+    assert len(captured_prompts) == 2
+    first_prompt, second_prompt = captured_prompts
+
+    # First highlight's prompt should reference the second highlight as context...
+    assert "chloroplasts" in first_prompt
+    assert "Other highlights" in first_prompt
+    # ...but not duplicate its own highlighted text in the "other highlights" list.
+    # (its own text still appears once, in the main "Highlighted Text" section)
+    assert first_prompt.count("chemical energy via photosynthesis") == 1
+
+    # Second highlight's prompt should reference the first as context.
+    assert "chemical energy via photosynthesis" in second_prompt
+    assert "Other highlights" in second_prompt
+
+
+def test_single_highlight_document_has_no_other_highlights_section(tmp_path):
+    """A single-highlight document has nothing to use as cross-highlight
+    context, so the "Other highlights" section shouldn't appear at all."""
+    path = tmp_path / "single.md"
+    path.write_text("""---
+author: example.com
+url: https://example.com/article
+---
+# Single Highlight Article
+
+## Highlights
+> [!info]
+> A single standalone highlight.
+""")
+
+    captured_prompts = []
+
+    def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
+        captured_prompts.append(prompt)
+        payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}
+        return LLMResponse(
+            content=json.dumps(payload), model=self.config.model, tokens_used=1,
+            cost_estimate=0.0, cached=False, response_time=0.0,
+        )
+
+    with patch("pdf2anki.llm.LLMProvider.generate", new=fake_generate):
+        from pdf2anki.llm import create_llm_provider
+        from pdf2anki.config import LLM as LLMConfig
+
+        llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
+        process_readwise_document(path, llm_provider, create_prompt_manager())
+
+    assert len(captured_prompts) == 1
+    assert "Other highlights" not in captured_prompts[0]
+
+
 def test_process_readwise_document_generates_cards(multi_highlight_md):
     def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
         payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}

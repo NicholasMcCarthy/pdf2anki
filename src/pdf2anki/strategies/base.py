@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
@@ -12,6 +13,36 @@ from ..llm import LLMProvider
 from ..prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+_CLOZE_PATTERN = re.compile(r"\{\{c\d+::[^}]+\}\}")
+
+
+def validate_cloze_format(cloze_text: Any, max_deletions: int = 3) -> bool:
+    """Validate that cloze_text contains 1-max_deletions well-formed
+    {{cN::...}} deletion markers. Shared by every strategy that can emit
+    Cloze cards (ClozeDefinitionsStrategy, and any strategy that lets the LLM
+    choose per-card between Basic and Cloze - see infer_card_type())."""
+    if not isinstance(cloze_text, str):
+        return False
+    matches = _CLOZE_PATTERN.findall(cloze_text)
+    if not matches:
+        return False
+    if len(matches) > max_deletions:
+        logger.warning(f"Too many cloze deletions ({len(matches)}) in: {cloze_text[:100]}...")
+        return False
+    return True
+
+
+def infer_card_type(card_data: Dict[str, Any]) -> str:
+    """Determine whether a card dict from an LLM response represents a Basic
+    or Cloze note. Prefers an explicit "card_type" field (used by strategies
+    that let the LLM choose per card, e.g. highlight_priority and
+    readwise_highlight), falling back to field-presence inference if it's
+    missing or invalid."""
+    declared = str(card_data.get("card_type", "")).strip().lower()
+    if declared in ("basic", "cloze"):
+        return declared
+    return "cloze" if card_data.get("cloze_text") else "basic"
 
 
 @dataclass
@@ -115,6 +146,8 @@ class BaseStrategy(ABC):
                 "page_end": chunk.end_page,
                 "pdf_title": pdf_metadata.get("title", "Unknown"),
                 "author": pdf_metadata.get("author", ""),
+                "abstract": pdf_metadata.get("abstract", ""),
+                "other_highlights": pdf_metadata.get("other_highlights", ""),
                 "strategy": self.name,
                 "max_cards": max_cards,
                 **self.config.params

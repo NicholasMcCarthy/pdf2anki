@@ -1,12 +1,27 @@
 You are analyzing highlighted/annotated excerpts from "{{ pdf_title }}" (page {{ page_start }}).
 
+{% if abstract %}
+**Paper Abstract** (for context only - understand the paper's core contribution and key concepts from this, but do not create cards purely from the abstract; cards must be grounded in the highlighted text below):
+{{ abstract }}
+
+{% endif %}
 **Text Content** (lines marked `[HIGHLIGHT]` are passages the reader specifically flagged as important; `[NOTE]` lines are the reader's own annotation on that highlight; `[PAGE CONTEXT]` is the surrounding page text, included only for disambiguation):
 
 {{ chunk }}
 
 ---
 
-**Task**: Generate up to {{ max_cards | default(5) }} high-quality Anki flashcards, prioritizing the `[HIGHLIGHT]` passages above. Use any `[NOTE]` annotations to understand what the reader considered important about each highlight. Only draw on `[PAGE CONTEXT]` to disambiguate terms or supply background - do not create cards purely from context that wasn't highlighted.
+**Task**: Generate up to {{ max_cards | default(5) }} high-quality Anki flashcards, prioritizing in this order:
+1. The `[HIGHLIGHT]` passages - these are always the primary source of card content.
+2. The abstract (if given above) - use it to identify which key concept a highlight is really about, and to frame questions around the paper's actual contribution rather than an isolated sentence.
+3. Key concepts over incidental detail - when a highlight touches on several things, test the concept that matters most to the paper's argument, not a minor aside.
+
+Use any `[NOTE]` annotations to understand what the reader considered important about each highlight. Only draw on `[PAGE CONTEXT]` to disambiguate terms or supply background - do not create cards purely from context that wasn't highlighted.
+
+**Choosing Basic vs. Cloze**: For each card, decide which format tests the material better and set `"card_type"` accordingly:
+- Use `"cloze"` for a self-contained definition, key term, formula, or precise fact that reads naturally as a sentence with one to three blanks.
+- Use `"basic"` for anything that needs a real question - a mechanism, comparison, cause/effect, methodology, or "why"/"how" the highlight is making a point.
+Do not force a concept into cloze format just to use both types - most highlights will naturally suit one or the other.
 
 **Requirements**:
 1. Ground every card in the highlighted text, not just any content on the page
@@ -15,14 +30,24 @@ You are analyzing highlighted/annotated excerpts from "{{ pdf_title }}" (page {{
 4. If a highlight is too short or fragmentary to form a good question on its own, use the page context to build a complete, well-formed card around it
 5. If there is genuinely nothing flashcard-worthy in the highlights, return an empty "cards" array rather than padding
 
-**Output Format**: Respond with valid JSON containing an array of flashcard objects:
+**Output Format**: Respond with valid JSON containing an array of flashcard objects. Basic cards use `front`/`back`; cloze cards use `cloze_text`/`extra` instead - include only the fields for the chosen `card_type`:
 
 ```json
 {
   "cards": [
     {
+      "card_type": "basic",
       "front": "Clear, specific question grounded in the highlighted text",
       "back": "Complete answer with explanation",
+      "page_citation": "p. {{ page_start }}",
+      "core_concept": "Main concept the highlight captures",
+      "difficulty": "easy|medium|hard",
+      "tags": ["tag1", "tag2"]
+    },
+    {
+      "card_type": "cloze",
+      "cloze_text": {% raw %}"Text with {{c1::a cloze deletion}} in it"{% endraw %},
+      "extra": "Additional context or explanation",
       "page_citation": "p. {{ page_start }}",
       "core_concept": "Main concept the highlight captures",
       "difficulty": "easy|medium|hard",

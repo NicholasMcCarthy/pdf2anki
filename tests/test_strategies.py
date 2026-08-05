@@ -299,3 +299,45 @@ def test_strategy_deduplication():
     fronts = [card.front for card in deduplicated]
     assert "What is Python?" in fronts
     assert "What is Java?" in fronts
+
+class TestSharedCardTypeHelpers:
+    """Tests for base.py's infer_card_type()/validate_cloze_format() - shared
+    by ClozeDefinitionsStrategy and any strategy that lets the LLM choose
+    per-card between Basic and Cloze (highlight_priority, readwise_highlight)."""
+
+    def test_validate_cloze_format_accepts_valid_single_deletion(self):
+        from pdf2anki.strategies.base import validate_cloze_format
+        assert validate_cloze_format("The {{c1::mitochondria}} is the powerhouse.") is True
+
+    def test_validate_cloze_format_accepts_up_to_three_deletions(self):
+        from pdf2anki.strategies.base import validate_cloze_format
+        assert validate_cloze_format("{{c1::A}}, {{c2::B}}, and {{c3::C}} are examples.") is True
+
+    def test_validate_cloze_format_rejects_no_markers(self):
+        from pdf2anki.strategies.base import validate_cloze_format
+        assert validate_cloze_format("no cloze markers here") is False
+
+    def test_validate_cloze_format_rejects_too_many_deletions(self):
+        from pdf2anki.strategies.base import validate_cloze_format
+        text = "{{c1::A}}, {{c2::B}}, {{c3::C}}, and {{c4::D}} are examples."
+        assert validate_cloze_format(text) is False
+
+    def test_validate_cloze_format_rejects_non_string(self):
+        from pdf2anki.strategies.base import validate_cloze_format
+        assert validate_cloze_format(None) is False
+        assert validate_cloze_format(123) is False
+
+    def test_infer_card_type_prefers_declared_type(self):
+        from pdf2anki.strategies.base import infer_card_type
+        assert infer_card_type({"card_type": "cloze", "front": "Q", "back": "A"}) == "cloze"
+        assert infer_card_type({"card_type": "Basic", "cloze_text": "{{c1::x}}"}) == "basic"
+
+    def test_infer_card_type_falls_back_to_field_presence(self):
+        from pdf2anki.strategies.base import infer_card_type
+        assert infer_card_type({"cloze_text": "{{c1::x}}"}) == "cloze"
+        assert infer_card_type({"front": "Q", "back": "A"}) == "basic"
+        assert infer_card_type({}) == "basic"
+
+    def test_infer_card_type_ignores_invalid_declared_value(self):
+        from pdf2anki.strategies.base import infer_card_type
+        assert infer_card_type({"card_type": "not-a-real-type", "cloze_text": "{{c1::x}}"}) == "cloze"
