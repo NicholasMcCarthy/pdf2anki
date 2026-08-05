@@ -36,47 +36,62 @@ class TokenUsage(BaseModel):
     total_tokens: int
 
 
+def _rejects_temperature(error: Exception) -> bool:
+    """Some newer models reject the `temperature` param outright (e.g.
+    Anthropic returning a 400 "`temperature` is deprecated for this model").
+    Detected by message rather than a hardcoded model-name list, since which
+    models this applies to changes over time and isn't documented per-model
+    anywhere the config can check in advance."""
+    msg = str(error).lower()
+    return "temperature" in msg and any(
+        phrase in msg for phrase in ("deprecated", "not supported", "unsupported", "not allowed")
+    )
+
+
 class LLMProvider:
     """Base LLM provider interface."""
-    
+
     def __init__(self, config: LLMConfig):
         self.config = config
         self.total_tokens = 0
         self.total_cost = 0.0
         self.cache_hits = 0
         self.api_calls = 0
-        
+        self._omit_temperature = False
+
         # Set up caching
         cache_path = ".llm_cache/langchain.db"
         Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
         set_llm_cache(SQLiteCache(database_path=cache_path))
-        
+
         # Initialize the LLM
         self.llm = self._initialize_llm()
-    
+
     def _initialize_llm(self):
         """Initialize the LLM instance."""
+        temperature_kwargs = {} if self._omit_temperature else {"temperature": self.config.temperature}
+
         if self.config.provider == "openai":
             return ChatOpenAI(
                 model=self.config.model,
-                temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 openai_api_key=self.config.api_key,
                 openai_api_base=self.config.base_url,
                 request_timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
                 model_kwargs={"seed": self.config.seed} if self.config.seed else {},
+                **temperature_kwargs,
             )
         elif self.config.provider == "anthropic":
             # Anthropic requires an explicit max_tokens (unlike OpenAI, None isn't accepted).
             return ChatAnthropic(
                 model=self.config.model,
-                temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens or 4096,
                 anthropic_api_key=self.config.api_key,
                 anthropic_api_url=self.config.base_url,
                 timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
+                **temperature_kwargs,
             )
         else:
             raise ValueError(f"Unsupported provider: {self.config.provider}")
@@ -159,6 +174,20 @@ class LLMProvider:
                 )
                 
             except Exception as e:
+                # This is a deterministic rejection of a request parameter, not a
+                # transient failure - retrying the identical request would just
+                # fail the same way every time. Rebuild the client without
+                # temperature and retry immediately, without consuming the
+                # normal exponential-backoff budget below.
+                if not self._omit_temperature and _rejects_temperature(e):
+                    logger.warning(
+                        f"Model {self.config.model} rejected the 'temperature' parameter - "
+                        f"retrying without it: {e}"
+                    )
+                    self._omit_temperature = True
+                    self.llm = self._initialize_llm()
+                    continue
+
                 if attempt < max_retries:
                     wait_time = 2 ** attempt  # Exponential backoff
                     logger.warning(f"LLM call failed, retrying in {wait_time}s (attempt {attempt + 1}): {e}")

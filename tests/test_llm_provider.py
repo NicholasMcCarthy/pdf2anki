@@ -1,11 +1,11 @@
 """Tests for LLMProvider provider selection (openai/anthropic)."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
 from pdf2anki.config import LLMConfig
-from pdf2anki.llm import LLMProvider, ModelRegistry
+from pdf2anki.llm import LLMProvider, ModelRegistry, _rejects_temperature
 
 
 def _make_config(provider: str, model: str = "gpt-4-1106-preview") -> LLMConfig:
@@ -46,3 +46,82 @@ def test_llm_cache_directory_is_created(tmp_path, monkeypatch):
 def test_model_registry_has_anthropic_models():
     info = ModelRegistry.get_model_info("claude-sonnet-5")
     assert info.get("provider") == "anthropic"
+
+
+def test_rejects_temperature_detects_anthropic_error_message():
+    error = Exception(
+        "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+        "'message': '`temperature` is deprecated for this model.'}}"
+    )
+    assert _rejects_temperature(error) is True
+
+
+def test_rejects_temperature_ignores_unrelated_errors():
+    assert _rejects_temperature(Exception("rate limit exceeded")) is False
+    assert _rejects_temperature(Exception("temperature must be between 0 and 1")) is False
+
+
+def test_first_call_includes_temperature_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic:
+        LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        _, kwargs = mock_chat_anthropic.call_args
+        assert "temperature" in kwargs
+
+
+def test_generate_recovers_by_omitting_temperature_and_retries_immediately(tmp_path, monkeypatch):
+    """Simulates the real failure mode: the model rejects `temperature` on the
+    first call. The provider should rebuild its client without it and retry
+    immediately (no sleep - this isn't a transient error)."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_rejected_error = Exception(
+        "Error code: 400 - {'error': {'message': '`temperature` is deprecated for this model.'}}"
+    )
+    success_response = Mock(content='{"cards": []}')
+
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls, \
+         patch("pdf2anki.llm.time.sleep") as mock_sleep:
+        first_client = Mock()
+        first_client.invoke.side_effect = temp_rejected_error
+        second_client = Mock()
+        second_client.invoke.return_value = success_response
+        mock_chat_anthropic_cls.side_effect = [first_client, second_client]
+
+        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        response = provider.generate(prompt="test prompt", max_retries=3)
+
+    assert response.content == '{"cards": []}'
+    assert provider._omit_temperature is True
+    # Rebuilt once (initial + after the rejection), and the second client had
+    # temperature omitted from its construction kwargs.
+    assert mock_chat_anthropic_cls.call_count == 2
+    _, second_call_kwargs = mock_chat_anthropic_cls.call_args
+    assert "temperature" not in second_call_kwargs
+    # No backoff sleep - the recovery path retries immediately.
+    mock_sleep.assert_not_called()
+
+
+def test_generate_does_not_loop_forever_if_temperature_rejection_persists(tmp_path, monkeypatch):
+    """Defensive: if the same 'temperature rejected' error somehow recurs after
+    already rebuilding without it, the provider must not retry the recovery
+    path a second time (which would loop forever) - it should fall through to
+    the normal bounded retry/backoff and eventually raise."""
+    monkeypatch.chdir(tmp_path)
+
+    temp_rejected_error = Exception(
+        "Error code: 400 - {'error': {'message': '`temperature` is deprecated for this model.'}}"
+    )
+
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls, \
+         patch("pdf2anki.llm.time.sleep"):
+        always_failing_client = Mock()
+        always_failing_client.invoke.side_effect = temp_rejected_error
+        mock_chat_anthropic_cls.return_value = always_failing_client
+
+        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        with pytest.raises(Exception):
+            provider.generate(prompt="test prompt", max_retries=1)
+
+    # One rebuild for the recovery attempt, but not runaway/infinite rebuilding.
+    assert mock_chat_anthropic_cls.call_count == 2

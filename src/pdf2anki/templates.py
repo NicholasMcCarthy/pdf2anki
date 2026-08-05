@@ -52,7 +52,13 @@ class NoteTypeManager:
     def _load_note_types(self):
         """Load all note type definitions from the notes directory."""
         if not self.notes_dir.exists():
-            logger.warning(f"Notes directory {self.notes_dir} does not exist")
+            # Debug, not warning: the module-level `note_type_manager` singleton
+            # below is constructed with the default "notes" (relative to cwd)
+            # at import time just because cli.py imports names from this module
+            # - which happens on every CLI invocation, regardless of command -
+            # so a missing default notes/ dir is an expected, harmless condition
+            # for most callers, not something worth surfacing as a warning.
+            logger.debug(f"Notes directory {self.notes_dir} does not exist")
             return
         
         for yaml_file in self.notes_dir.glob("*.yaml"):
