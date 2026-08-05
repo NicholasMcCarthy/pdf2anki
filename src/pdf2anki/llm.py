@@ -36,6 +36,29 @@ class TokenUsage(BaseModel):
     total_tokens: int
 
 
+def _extract_text_content(content: Any) -> str:
+    """Normalize a LangChain AIMessage.content value to a plain string.
+
+    Models capable of structured/multi-block responses (e.g. extended
+    thinking) can return `content` as a list of content blocks - typically
+    dicts like {"type": "text", "text": "..."} interleaved with non-text
+    blocks (thinking, redacted_thinking, tool_use, etc.) - instead of a plain
+    string. json.loads() and downstream code expect a string; concatenate
+    just the text blocks, in order, ignoring everything else.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return str(content)
+
+
 def _rejects_temperature(error: Exception) -> bool:
     """Some newer models reject the `temperature` param outright (e.g.
     Anthropic returning a 400 "`temperature` is deprecated for this model").
@@ -151,21 +174,26 @@ class LLMProvider:
                     cost = 0.0
                     self.api_calls += 1
                 
+                # response.content is usually a plain string, but models capable of
+                # structured/multi-block responses (e.g. extended thinking) can return
+                # a list of content blocks instead - normalize before any string use.
+                response_text = _extract_text_content(response.content)
+
                 # Validate JSON if requested
                 if json_mode:
                     try:
-                        json.loads(response.content)
+                        json.loads(response_text)
                     except json.JSONDecodeError as e:
                         if attempt < max_retries:
                             logger.warning(f"Invalid JSON response, retrying (attempt {attempt + 1}): {e}")
                             continue
                         else:
                             raise ValueError(f"Failed to get valid JSON after {max_retries} retries: {e}")
-                
+
                 response_time = time.time() - start_time
-                
+
                 return LLMResponse(
-                    content=response.content,
+                    content=response_text,
                     model=self.config.model,
                     tokens_used=tokens_used,
                     cost_estimate=cost,

@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from pdf2anki.config import LLMConfig
-from pdf2anki.llm import LLMProvider, ModelRegistry, _rejects_temperature
+from pdf2anki.llm import LLMProvider, ModelRegistry, _extract_text_content, _rejects_temperature
 
 
 def _make_config(provider: str, model: str = "gpt-4-1106-preview") -> LLMConfig:
@@ -46,6 +46,51 @@ def test_llm_cache_directory_is_created(tmp_path, monkeypatch):
 def test_model_registry_has_anthropic_models():
     info = ModelRegistry.get_model_info("claude-sonnet-5")
     assert info.get("provider") == "anthropic"
+
+
+def test_extract_text_content_passes_through_plain_string():
+    assert _extract_text_content("hello") == "hello"
+
+
+def test_extract_text_content_concatenates_text_blocks():
+    content = [
+        {"type": "thinking", "thinking": "reasoning about the answer..."},
+        {"type": "text", "text": '{"cards": []}'},
+    ]
+    assert _extract_text_content(content) == '{"cards": []}'
+
+
+def test_extract_text_content_joins_multiple_text_blocks():
+    content = [{"type": "text", "text": "part one"}, {"type": "text", "text": "part two"}]
+    assert _extract_text_content(content) == "part onepart two"
+
+
+def test_extract_text_content_ignores_non_text_blocks_entirely():
+    content = [{"type": "redacted_thinking", "data": "..."}, {"type": "tool_use", "input": {}}]
+    assert _extract_text_content(content) == ""
+
+
+def test_generate_handles_list_content_from_structured_response(tmp_path, monkeypatch):
+    """Reproduces a real failure: some models return AIMessage.content as a
+    list of content blocks (e.g. a thinking block plus a text block) instead
+    of a plain string, which previously broke json.loads() with 'the JSON
+    object must be str, bytes or bytearray, not list'."""
+    monkeypatch.chdir(tmp_path)
+
+    list_content_response = Mock(content=[
+        {"type": "thinking", "thinking": "let me work through this..."},
+        {"type": "text", "text": '{"cards": [{"front": "Q", "back": "A"}]}'},
+    ])
+
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls:
+        client = Mock()
+        client.invoke.return_value = list_content_response
+        mock_chat_anthropic_cls.return_value = client
+
+        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        response = provider.generate(prompt="test", json_mode=True, max_retries=0)
+
+    assert response.content == '{"cards": [{"front": "Q", "back": "A"}]}'
 
 
 def test_rejects_temperature_detects_anthropic_error_message():
