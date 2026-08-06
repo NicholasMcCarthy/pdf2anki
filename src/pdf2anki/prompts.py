@@ -57,6 +57,17 @@ class PromptManager:
     
     def render_template(self, template_name: str, **kwargs) -> str:
         """Render a template with the given variables."""
+        # basic_fields/cloze_fields (per-field LLM instructions from
+        # notes/*.yaml - see note_types.get_note_type_fields()) are normally
+        # supplied by BaseStrategy.generate_cards(), but any caller that
+        # renders a template directly (a smoke test, a CLI preview command)
+        # won't pass them. Templates access these with dict .get() chaining
+        # (e.g. basic_fields.get('front', {}).get('llm_instructions', ...)),
+        # which requires basic_fields/cloze_fields to at least be real dicts -
+        # an entirely-undefined top-level var raises before any .get() or
+        # `| default(...)` filter downstream gets a chance to apply.
+        kwargs.setdefault("basic_fields", {})
+        kwargs.setdefault("cloze_fields", {})
         template = self.get_template(template_name)
         return template.render(**kwargs)
     

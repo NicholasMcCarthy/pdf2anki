@@ -25,8 +25,8 @@ You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start
 {
   "cards": [
     {
-      "front": "Clear, specific question",
-      "back": "Complete answer with explanation",
+      "front": "{{ basic_fields.get('front', {}).get('llm_instructions', 'Clear, specific question') }}",
+      "back": "{{ basic_fields.get('back', {}).get('llm_instructions', 'Complete answer with explanation') }}",
       "page_citation": "p. {{ page_start }}",
       "core_concept": "Main concept being tested",
       "difficulty": "easy|medium|hard",

@@ -48,6 +48,50 @@ def test_cloze_template_preserves_literal_cloze_syntax_as_text():
     assert "{{c1::mitochondria}}" in rendered
 
 
+@pytest.mark.parametrize("template_name", [
+    "key_points.j2",
+    "cloze_definitions.j2",
+    "figure_based.j2",
+    "highlight_priority.j2",
+    "readwise_highlight.j2",
+])
+def test_shipped_template_threads_real_note_type_instructions(template_name):
+    """The Output Format JSON block's front/back/cloze_text/extra placeholder
+    text is sourced from notes/basic.yaml and notes/cloze.yaml (see
+    note_types.get_note_type_fields()), not hardcoded per-template - render
+    with the real loaded fields and confirm the actual yaml content made it
+    into the rendered prompt."""
+    from pdf2anki.note_types import get_note_type_fields
+
+    pm = create_prompt_manager()
+    basic_fields = get_note_type_fields("basic")
+    cloze_fields = get_note_type_fields("cloze")
+
+    rendered = pm.render_template(
+        template_name,
+        chunk="Sample chunk text.",
+        section="Intro",
+        page_start=1,
+        page_end=1,
+        pdf_title="Test Doc",
+        author="",
+        abstract="",
+        highlight_count=1,
+        max_cards=3,
+        basic_fields=basic_fields,
+        cloze_fields=cloze_fields,
+    )
+
+    # key_points.j2/figure_based.j2 are Basic-only, cloze_definitions.j2 is
+    # Cloze-only, highlight_priority.j2/readwise_highlight.j2 emit both -
+    # check whichever field pair the template actually renders.
+    if '"front"' in rendered:
+        assert basic_fields["front"]["llm_instructions"] in rendered
+        assert basic_fields["back"]["llm_instructions"] in rendered
+    if '"cloze_text"' in rendered:
+        assert cloze_fields["cloze_text"]["llm_instructions"] in rendered
+
+
 def test_cloze_definitions_strategy_points_at_the_renamed_template():
     from pdf2anki.strategies.cloze_definitions import ClozeDefinitionsStrategy
     from unittest.mock import Mock

@@ -31,8 +31,8 @@ You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start
 {
   "cards": [
     {
-      "cloze_text": "Text with {% raw %}{{c1::cloze}}{% endraw %} deletions",
-      "extra": "Additional context or explanation",
+      "cloze_text": "{{ cloze_fields.get('cloze_text', {}).get('llm_instructions', 'Text with {{c1::cloze}} deletions') }}",
+      "extra": "{{ cloze_fields.get('extra', {}).get('llm_instructions', 'Additional context or explanation') }}",
       "page_citation": "p. {{ page_start }}",
       "core_concept": "Main concept being tested",
       "difficulty": "easy|medium|hard",

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from ..chunking import TextChunk
 from ..config import StrategyConfig
 from ..llm import LLMProvider
+from ..note_types import get_note_type_fields
 from ..prompts import PromptManager
 
 logger = logging.getLogger(__name__)
@@ -162,6 +163,13 @@ class BaseStrategy(ABC):
                 "highlight_count": pdf_metadata.get("highlight_count"),
                 "strategy": self.name,
                 "max_cards": max_cards,
+                # Per-field LLM instructions from notes/basic.yaml and
+                # notes/cloze.yaml - see note_types.get_note_type_fields().
+                # Every strategy gets both regardless of which card types it
+                # actually emits; a template that doesn't reference one just
+                # ignores it.
+                "basic_fields": get_note_type_fields("basic"),
+                "cloze_fields": get_note_type_fields("cloze"),
                 **self.config.params
             }
             

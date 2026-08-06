@@ -25,8 +25,8 @@ You are analyzing the following text from "{{ pdf_title }}" (pages {{ page_start
 {
   "cards": [
     {
-      "front": "Question about the visual content or its interpretation",
-      "back": "Answer with explanation of the visual element and its significance",
+      "front": "{{ basic_fields.get('front', {}).get('llm_instructions', 'Question about the visual content or its interpretation') }}",
+      "back": "{{ basic_fields.get('back', {}).get('llm_instructions', 'Answer with explanation of the visual element and its significance') }}",
       "page_citation": "p. {{ page_start }}",
       "core_concept": "Main concept illustrated by the visual",
       "difficulty": "easy|medium|hard",

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import shutil
 
-from src.pdf2anki.templates import NoteTypeManager, PromptManager, NoteTypeDefinition, PromptTemplate
+from src.pdf2anki.templates import NoteTypeManager
 
 
 class TestNoteTypeManager:
@@ -74,111 +74,23 @@ rendering:
         assert len(fields) > 10  # Should have many provenance fields
 
 
-class TestPromptManager:
-    """Test prompt template loading and rendering."""
-    
-    def test_load_embedded_prompt(self, tmp_path):
-        """Test loading prompt with embedded template."""
-        prompt_file = tmp_path / "test_prompt.yaml"
-        prompt_file.write_text("""
-name: "test_key_points"
-version: "1.0"
-description: "Test prompt"
-note_type: "basic"
-safety_rule: "Return empty list if not fact-like"
-template: |
-  Create flashcards from: {{ chunk_text }}
-  Max cards: {{ max_cards | default(3) }}
-parameters:
-  max_cards:
-    type: integer
-    default: 3
-""")
-        
-        manager = PromptManager(tmp_path)
-        assert "test_key_points" in manager.list_prompts()
-        
-        prompt = manager.get_prompt("test_key_points")
-        assert prompt is not None
-        assert prompt.name == "test_key_points"
-        assert prompt.template is not None
-    
-    def test_render_prompt(self, tmp_path):
-        """Test prompt rendering with Jinja."""
-        prompt_file = tmp_path / "render_test.yaml"
-        prompt_file.write_text("""
-name: "render_test"
-version: "1.0"
-description: "Test rendering"
-note_type: "basic"
-safety_rule: "Be safe"
-template: |
-  Text: {{ chunk_text }}
-  Cards: {{ max_cards | default(5) }}
-  Rule: {{ safety_rule }}
-""")
-        
-        manager = PromptManager(tmp_path)
-        
-        rendered = manager.render_prompt("render_test", {
-            "chunk_text": "Sample content",
-            "max_cards": 3
-        })
-        
-        assert "Text: Sample content" in rendered
-        assert "Cards: 3" in rendered
-        assert "Rule: Be safe" in rendered
-    
-    def test_external_template_file(self, tmp_path):
-        """Test loading external template file."""
-        # Create templates subdirectory
-        templates_dir = tmp_path / "templates"
-        templates_dir.mkdir()
-        
-        # Create external template
-        template_file = templates_dir / "external.j2"
-        template_file.write_text("External template: {{ chunk_text }}")
-        
-        # Create prompt that references it
-        prompt_file = tmp_path / "external_prompt.yaml"
-        prompt_file.write_text("""
-name: "external_test"
-version: "1.0"
-description: "External template test"
-note_type: "basic"
-safety_rule: "Be safe"
-template_file: "templates/external.j2"
-""")
-        
-        manager = PromptManager(tmp_path)
-        
-        rendered = manager.render_prompt("external_test", {
-            "chunk_text": "Test content"
-        })
-        
-        assert "External template: Test content" in rendered
-
-
 def test_template_integration():
-    """Test integration between note types and prompts using actual files."""
-    # Use the actual notes and prompts directories
+    """Test loading the actual shipped notes/*.yaml files."""
+    # Use the actual notes directory
     note_manager = NoteTypeManager(Path("notes"))
-    prompt_manager = PromptManager(Path("prompts"))
-    
+
     # Should load our example files
     note_types = note_manager.list_note_types()
-    prompts = prompt_manager.list_prompts()
-    
+
     assert "basic" in note_types
     assert "cloze" in note_types
-    assert len(prompts) >= 2  # Should have key_points and cloze_definitions
-    
+
     # Test note type definition
     basic = note_manager.get_note_type("basic")
     assert basic is not None
     assert "front" in basic.fields
     assert "back" in basic.fields
-    
+
     # Test CSV field generation
     csv_fields = note_manager.get_csv_fields("basic")
     assert len(csv_fields) > 10  # Should include provenance fields

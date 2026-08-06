@@ -59,6 +59,7 @@ WORKDIR /home/pdf2anki
 # Copy application code
 COPY --chown=pdf2anki:pdf2anki src/ /home/pdf2anki/src/
 COPY --chown=pdf2anki:pdf2anki prompts/ /home/pdf2anki/prompts/
+COPY --chown=pdf2anki:pdf2anki notes/ /home/pdf2anki/notes/
 COPY --chown=pdf2anki:pdf2anki examples/ /home/pdf2anki/examples/
 
 # Set Python path

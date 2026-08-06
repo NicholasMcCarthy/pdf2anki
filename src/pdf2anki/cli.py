@@ -27,7 +27,7 @@ from .pdf import PDFProcessor
 from .chunking import TextChunker
 from .llm import create_llm_provider
 from .preprocess import process_single_pdf
-from .templates import get_note_type_manager, NoteTypeManager, PromptManager
+from .templates import get_note_type_manager, NoteTypeManager
 
 app = typer.Typer(
     name="pdf2anki",
@@ -41,26 +41,24 @@ def _get_template_managers(current_dir: Path = Path.cwd()):
     """Get template managers, using init directories if they exist."""
     init_prompts_dir = current_dir / "prompts"
     init_notes_dir = current_dir / "notes"
-    
+
     # Check if we're in an initialized directory with custom templates
     if init_prompts_dir.exists() and init_notes_dir.exists():
         console.print(f"📁 Using templates from init directory: {current_dir}", style="yellow")
-        
+
         # Create custom managers using init directories
         from .prompts import create_prompt_manager
         prompt_manager = create_prompt_manager(init_prompts_dir)
         note_type_manager = NoteTypeManager(init_notes_dir)
-        template_prompt_manager = PromptManager(init_prompts_dir)
-        
-        return prompt_manager, note_type_manager, template_prompt_manager
+
+        return prompt_manager, note_type_manager
     else:
         # Use default managers
         from .prompts import create_prompt_manager
         prompt_manager = create_prompt_manager()
         note_type_manager = get_note_type_manager()
-        template_prompt_manager = PromptManager()
-        
-        return prompt_manager, note_type_manager, template_prompt_manager
+
+        return prompt_manager, note_type_manager
 
 
 @app.command()
@@ -416,7 +414,7 @@ def generate(
             base_config = Config()
         
         # Get template managers (using init directories if available)
-        prompt_manager, note_type_manager, template_prompt_manager = _get_template_managers()
+        prompt_manager, note_type_manager = _get_template_managers()
         
         # Handle plan-sample-csv first as it doesn't need documents.yaml
         if plan_sample_csv:
@@ -757,7 +755,7 @@ def generate_readwise(
 
         console.print(f"📄 Found {len(md_files)} markdown files")
 
-        prompt_manager, _, _ = _get_template_managers()
+        prompt_manager, _ = _get_template_managers()
         llm_provider = create_llm_provider(base_config.llm)
         id_manager = create_id_manager(base_config.ids)
 

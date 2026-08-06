@@ -198,8 +198,8 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
   "cards": [
     {
       "card_type": "basic",
-      "front": "Specific, contextualised, independently understandable question",
-      "back": "Concise but complete answer, including essential qualifications. Source: Paper reference, p. X.",
+      "front": "{{ basic_fields.get('front', {}).get('llm_instructions', 'Specific, contextualised, independently understandable question') }}",
+      "back": "{{ basic_fields.get('back', {}).get('llm_instructions', 'Concise but complete answer, including essential qualifications') }}. Source: Paper reference, p. X.",
       "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
       "core_concept": "The main knowledge or research insight being tested",
@@ -208,8 +208,8 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
     },
     {
       "card_type": "cloze",
-      "cloze_text": {% raw %}"Within a clearly specified domain or setting, {{c1::the meaningful concept or relationship}}."{% endraw %},
-      "extra": "Brief explanation or qualification. Source: Paper reference, p. X.",
+      "cloze_text": "{{ cloze_fields.get('cloze_text', {}).get('llm_instructions', 'Within a clearly specified domain or setting, {{c1::the meaningful concept or relationship}}.') }}",
+      "extra": "{{ cloze_fields.get('extra', {}).get('llm_instructions', 'Brief explanation or qualification') }}. Source: Paper reference, p. X.",
       "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
       "core_concept": "The main knowledge or research insight being tested",

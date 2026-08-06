@@ -150,8 +150,8 @@ Use short, general-purpose tags. Do not invent highly specific tags from uncerta
   "cards": [
     {
       "card_type": "basic",
-      "front": "Clear, specific, independently understandable question",
-      "back": "Concise but complete answer",
+      "front": "{{ basic_fields.get('front', {}).get('llm_instructions', 'Clear, specific, independently understandable question') }}",
+      "back": "{{ basic_fields.get('back', {}).get('llm_instructions', 'Concise but complete answer') }}",
       "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
       "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
@@ -159,8 +159,8 @@ Use short, general-purpose tags. Do not invent highly specific tags from uncerta
     },
     {
       "card_type": "cloze",
-      "cloze_text": {% raw %}"Self-contained text with {{c1::a meaningful deletion}}"{% endraw %},
-      "extra": "Optional brief context or explanation",
+      "cloze_text": "{{ cloze_fields.get('cloze_text', {}).get('llm_instructions', 'Self-contained text with {{c1::a meaningful deletion}}') }}",
+      "extra": "{{ cloze_fields.get('extra', {}).get('llm_instructions', 'Optional brief context or explanation') }}",
       "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
       "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
