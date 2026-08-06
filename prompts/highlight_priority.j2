@@ -1,60 +1,222 @@
-You are analyzing highlighted/annotated excerpts from "{{ pdf_title }}" (page {{ page_start }}).
+You are analysing highlighted and annotated excerpts from the academic paper "{{ pdf_title }}" (page {{ page_start }}).
 
+{% if author %}
+**Author(s)**: {{ author }}
+{% endif %}
 {% if abstract %}
-**Paper Abstract** (for context only - understand the paper's core contribution and key concepts from this, but do not create cards purely from the abstract; cards must be grounded in the highlighted text below):
+**Paper abstract**:
+
 {{ abstract }}
 
+Use the abstract to understand the paper's domain, research question, contribution, and terminology. Do not create cards solely from the abstract; tested knowledge must be grounded in the highlighted material.
 {% endif %}
-**Text Content** (lines marked `[HIGHLIGHT]` are passages the reader specifically flagged as important; `[NOTE]` lines are the reader's own annotation on that highlight; `[PAGE CONTEXT]` is the surrounding page text, included only for disambiguation):
+
+**Annotated text**:
+
+- `[HIGHLIGHT]` marks text deliberately selected by the reader.
+- `[NOTE]` marks the reader's own annotation or assessment.
+- `[PAGE CONTEXT]` provides surrounding text for interpretation and disambiguation only.
 
 {{ chunk }}
 
 ---
 
-**Task**: Generate up to {{ max_cards | default(5) }} high-quality Anki flashcards, prioritizing in this order:
-1. The `[HIGHLIGHT]` passages - these are always the primary source of card content.
-2. The abstract (if given above) - use it to identify which key concept a highlight is really about, and to frame questions around the paper's actual contribution rather than an isolated sentence.
-3. Key concepts over incidental detail - when a highlight touches on several things, test the concept that matters most to the paper's argument, not a minor aside.
+## Task
 
-Use any `[NOTE]` annotations to understand what the reader considered important about each highlight. Only draw on `[PAGE CONTEXT]` to disambiguate terms or supply background - do not create cards purely from context that wasn't highlighted.
+Triage the annotations and generate up to {{ max_cards | default(5) }} high-quality Anki flashcards containing knowledge worth retaining as an academic researcher.
 
-**Choosing Basic vs. Cloze**: For each card, decide which format tests the material better and set `"card_type"` accordingly:
-- Use `"cloze"` for a self-contained definition, key term, formula, or precise fact that reads naturally as a sentence with one to three blanks.
-- Use `"basic"` for anything that needs a real question - a mechanism, comparison, cause/effect, methodology, or "why"/"how" the highlight is making a point.
-Do not force a concept into cloze format just to use both types - most highlights will naturally suit one or the other.
+The maximum number of cards is not a target. Generate fewer cards—or none—when the excerpts contain only paper-specific minutiae, reading markup, or material that does not merit long-term recall.
 
-**Requirements**:
-1. Ground every card in the highlighted text, not just any content on the page
-2. Prefer testing the specific concept, technique, or definition the highlight calls out
-3. Include page citations in the format "p. {{ page_start }}"
-4. If a highlight is too short or fragmentary to form a good question on its own, use the page context to build a complete, well-formed card around it
-5. If there is genuinely nothing flashcard-worthy in the highlights, return an empty "cards" array rather than padding
+## Step 1: Determine the source and purpose of each annotation
 
-**Output Format**: Respond with valid JSON containing an array of flashcard objects. Basic cards use `front`/`back`; cloze cards use `cloze_text`/`extra` instead - include only the fields for the chosen `card_type`:
+Classify the highlighted material into one or more of these categories:
 
-```json
+- `general_principle`: A transferable scientific, statistical, methodological, or theoretical principle.
+- `key_concept`: An important definition, framework, mechanism, or conceptual distinction.
+- `key_finding`: A substantive empirical result with broader scientific relevance.
+- `methodological_insight`: A useful insight about study design, modelling, measurement, validation, or interpretation.
+- `interesting_connection`: A meaningful relationship between concepts, methods, domains, or findings.
+- `important_resource`: A dataset, tool, model family, benchmark, standard, or cited work worth remembering.
+- `paper_contribution`: The paper's main novel method, argument, or contribution.
+- `paper_specific_detail`: A detail necessary for understanding this paper but unlikely to transfer elsewhere.
+- `model_minutiae`: Specific hyperparameters, architectural settings, ablation values, implementation details, or minor performance differences.
+- `reader_assessment`: The reader's criticism, question, approval, disagreement, or evaluative markup.
+- `editing_or_navigation`: Markup used to revisit, edit, quote, discuss, or navigate the paper rather than to learn its content.
+- `insufficient_context`: A fragment that cannot support a reliable and useful card.
+
+Infer the annotation's purpose from the highlighted passage, any `[NOTE]`, the abstract, and the surrounding context. Do not assume that every highlight was intended for memorisation.
+
+## Step 2: Decide whether the material merits a flashcard
+
+Prioritise knowledge that would improve an academic researcher's durable understanding or judgement:
+
+1. General principles that transfer across papers or projects.
+2. Key concepts, mechanisms, and meaningful distinctions.
+3. Methodological insights, including assumptions, limitations, and validation principles.
+4. Important findings that influence understanding of a field.
+5. Interesting connections between methods, findings, or domains.
+6. A paper's central contribution when it is important enough to associate with that paper.
+7. Important resources or model families when knowing them would guide future research.
+
+Usually do not create cards for:
+
+- isolated metrics or small performance differences;
+- exact sample counts unless scientifically consequential;
+- arbitrary hyperparameters;
+- layer counts, optimiser settings, or implementation minutiae;
+- exhaustive lists of model variants;
+- minor ablation results;
+- dataset-specific preprocessing details;
+- routine statistical analyses;
+- statements highlighted only for editing, criticism, citation, navigation, or later discussion;
+- claims whose significance cannot be established from the supplied material.
+
+A `[NOTE]` may reveal a transferable insight worth testing. However, do not convert a casual reaction such as “unclear,” “check this,” or “bad analysis” into a flashcard unless the supplied text supports a specific methodological lesson.
+
+Paper-specific facts may become cards when they represent a landmark finding, an influential contribution, an important counterexample, or a result the researcher would reasonably want to associate with this paper.
+
+If no material passes this threshold, return an empty `cards` array.
+
+## Step 3: Frame each card in its proper domain and context
+
+Every card must be independently understandable. State the relevant domain, task, population, modality, or methodological setting in the question or cloze text.
+
+Bad:
+
+- “What model is good for cardiac analysis?”
+- “What did the method improve?”
+- “Why is this approach useful?”
+- “What accuracy was achieved?”
+
+Better:
+
+- “Within biomedical image segmentation, which model families have been effective for cardiac MRI segmentation?”
+- “In federated healthcare data harmonisation, what problem does terminology alignment address?”
+- “When validating a clinical prediction model across hospitals, why is external validation important?”
+- “In this study of cardiac MRI segmentation, what was the principal advantage reported for the proposed method?”
+
+Do not silently generalise a paper-specific result beyond its evidence. Preserve important qualifiers concerning:
+
+- domain and task;
+- study population;
+- modality or dataset;
+- experimental setting;
+- comparison method;
+- outcome being measured;
+- observational versus causal interpretation;
+- conditions under which the claim holds.
+
+When a finding is specific to this paper, signal that explicitly with wording such as “In this study...” or “According to [paper]...”. When the highlight supports a genuinely general principle, frame it as transferable knowledge and cite the paper as the source.
+
+## Grounding and use of context
+
+1. The `[HIGHLIGHT]` passages are the primary source of card content.
+2. Use `[NOTE]` annotations to determine why a passage was selected and what should be emphasised.
+3. Use the abstract to identify the paper's domain, central problem, and contribution.
+4. Use `[PAGE CONTEXT]` only to resolve references, expand incomplete sentences, identify the relevant domain, or make a highlighted idea intelligible.
+5. Do not create a card whose tested claim comes only from the abstract or page context.
+6. You may add brief, reliable background knowledge to clarify terminology, but it must not replace or materially extend the highlighted claim.
+7. If context cannot resolve an ambiguous or fragmentary highlight, do not generate a card from it.
+
+## Card granularity
+
+Prefer one meaningful learning objective per card, but do not over-atomise connected scientific ideas.
+
+For general principles and definitions, relatively atomic cards are appropriate.
+
+For findings, arguments, methods, or limitations, preserve enough information to capture:
+
+- what was found or proposed;
+- the setting in which it applies;
+- why it matters;
+- any essential qualification or limitation.
+
+Do not generate several cards that separately test minor parts of the same result. Prefer one stronger card that captures the scientifically meaningful relationship.
+
+## Choosing Basic vs. Cloze
+
+Use `basic` for:
+
+- mechanisms and explanations;
+- methodological reasoning;
+- comparisons and trade-offs;
+- causes and consequences;
+- key findings requiring contextual interpretation;
+- limitations or assumptions;
+- connections between concepts;
+- questions about why or how a method works.
+
+Use `cloze` for:
+
+- precise definitions;
+- standard terminology;
+- compact formulas;
+- well-defined relationships;
+- short, self-contained factual statements;
+- ordered stages where sequence matters.
+
+A cloze sentence must state its domain and context clearly. Do not create a cloze by deleting arbitrary model names, numbers, or words from a sentence. Use one to three meaningful deletions, and avoid removing so much that the remaining text provides no useful retrieval cue.
+
+Most excerpts will naturally suit one card type; do not force the output to contain both.
+
+## Citations and paper reference
+
+Every card must identify its source.
+
+For a basic card, include the reference at the end of `back`.
+
+For a cloze card, include it at the end of `extra`.
+
+Use this format:
+
+{% if author %}
+"Source: {{ author }}, {{ pdf_title }}, p. {{ page_start }}."
+{% else %}
+"Source: {{ pdf_title }}, p. {{ page_start }}."
+{% endif %}
+
+Do not put the reference in the question or cloze text unless identifying the paper is itself part of the learning objective.
+
+Also retain the structured `page_citation` field for indexing.
+
+## Output format
+
+Return valid JSON only. Do not include Markdown fences, commentary, or text outside the JSON.
+
+Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. Include only the fields appropriate to the selected card type.
+
+`annotation_category` should identify the principal category that justified creating the card.
+
 {
+  "content_assessment": {
+    "primary_domain": "Specific academic or scientific domain",
+    "annotation_purpose": [
+      "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution|paper_specific_detail|model_minutiae|reader_assessment|editing_or_navigation|insufficient_context"
+    ],
+    "summary": "Brief explanation of what the annotations contain and whether they merit durable recall"
+  },
   "cards": [
     {
       "card_type": "basic",
-      "front": "Clear, specific question grounded in the highlighted text",
-      "back": "Complete answer with explanation",
+      "front": "Specific, contextualised, independently understandable question",
+      "back": "Concise but complete answer, including essential qualifications. Source: Paper reference, p. X.",
       "page_citation": "p. {{ page_start }}",
-      "core_concept": "Main concept the highlight captures",
+      "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
+      "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",
-      "tags": ["tag1", "tag2"]
+      "tags": ["domain", "topic"]
     },
     {
       "card_type": "cloze",
-      "cloze_text": {% raw %}"Text with {{c1::a cloze deletion}} in it"{% endraw %},
-      "extra": "Additional context or explanation",
+      "cloze_text": "Within a clearly specified domain or setting, {{c1::the meaningful concept or relationship}}.",
+      "extra": "Brief explanation or qualification. Source: Paper reference, p. X.",
       "page_citation": "p. {{ page_start }}",
-      "core_concept": "Main concept the highlight captures",
+      "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
+      "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",
-      "tags": ["tag1", "tag2"]
+      "tags": ["domain", "topic"]
     }
   ]
 }
-```
 
-Generate the flashcards now:
+Generate the flashcards now.

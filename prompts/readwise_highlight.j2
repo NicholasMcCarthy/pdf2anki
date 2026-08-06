@@ -1,56 +1,180 @@
-You are analyzing a single highlight saved from "{{ pdf_title }}"{% if author %} ({{ author }}){% endif %} - a web article or document the reader highlighted and saved via Readwise.
+You are analysing a single highlight saved from "{{ pdf_title }}"{% if author %} by {{ author }}{% endif %}. The source may be a web article, book, paper, reference work, poem, story, essay, or other learning material saved through Readwise.
 
-**Highlighted Text**:
+**Primary highlight**:
 {{ chunk }}
 
 {% if "[NOTE]" in chunk %}
-Note: a `[NOTE]` line above is the reader's own annotation on this highlight - use it to understand why they saved it and what to emphasize.
+A line beginning with `[NOTE]` is the reader's own annotation. Use it to understand why the material matters to them and what should be emphasised, but distinguish the annotation from the source text.
 {% endif %}
-{% if other_highlights %}
 
-**Other highlights the reader saved from this same article** (context only - these help you understand the surrounding argument/narrative so you can write a better-informed card, but do not create cards purely from them; every card must still be grounded in the highlight above):
+{% if other_highlights %}
+**Other highlights from the same source**:
 {{ other_highlights }}
+
+These are supplied only to help identify the source type and understand the surrounding context. Unless applying the special poetry instructions below, do not create a card whose tested content comes only from these contextual highlights.
 {% endif %}
 
 ---
 
-**Task**: Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards grounded in this highlight.
+## Task
 
-**Requirements**:
-1. The core claim, definition, or fact each card tests must come from the highlighted text (and note, if present) - do not test something that isn't actually in it
-2. You may draw on your own general background knowledge to add brief clarifying context (e.g. spelling out an acronym, naming the broader field a term belongs to) - but keep this light, and never let it replace or override what the highlight actually says
-3. Use the other highlights (if given above) only to understand context - not as source material for a card
-4. Prefer a card that tests the specific claim, definition, or fact the highlight captures
-5. If the highlight is too short, vague, or not fact-like enough to support a good flashcard, return an empty "cards" array rather than padding
-6. Keep answers concise but complete
+Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards based on the primary highlight.
 
-**Choosing Basic vs. Cloze**: For each card, decide which format tests the material better and set `"card_type"` accordingly:
-- Use `"cloze"` for a self-contained definition, key term, or precise fact that reads naturally as a sentence with one to three blanks.
-- Use `"basic"` for anything that needs a real question - a claim, comparison, or "why"/"how" the highlight is making a point.
+Before generating cards, classify the highlighted material into the most appropriate content type:
 
-**Output Format**: Respond with valid JSON containing an array of flashcard objects. Basic cards use `front`/`back`; cloze cards use `cloze_text`/`extra` instead - include only the fields for the chosen `card_type`:
+- `definition`
+- `factual`
+- `technical`
+- `conceptual`
+- `argument`
+- `process`
+- `comparison`
+- `historical`
+- `biographical`
+- `narrative`
+- `poetry`
+- `quotation`
+- `other`
 
-```json
+Use this classification to determine the appropriate card style and level of granularity.
+
+## General requirements
+
+1. Every tested claim, fact, definition, relationship, or passage must be supported by the primary highlight.
+2. Use the reader's `[NOTE]`, when present, to guide emphasis and interpretation.
+3. You may add brief, reliable background context—such as expanding an acronym or identifying a broader field—but do not introduce unsupported claims or turn outside knowledge into the object being tested.
+4. Use other highlights only for contextual interpretation, not as independent card material, except where they clearly form part of the same poem under the poetry rules.
+5. Do not generate multiple cards that test essentially the same information.
+6. Keep answers concise enough for efficient recall, while retaining the context needed to make the card meaningful.
+7. Make each card understandable without requiring the learner to reopen the source.
+8. Avoid vague prompts such as “What does this say?” or questions that merely ask the learner to repeat an arbitrary sentence.
+9. If the material is too vague, fragmentary, dependent on missing context, or not worth memorising, return an empty `cards` array.
+10. Treat `{{ max_cards | default(2) }}` as a maximum, not a target. Generate only cards that are genuinely useful.
+
+## Card strategy by content type
+
+### Definitions, factual material, and reference content
+
+Prefer atomic cards that test one retrievable item at a time:
+
+- a term and its definition;
+- a person, place, date, event, or relationship;
+- one precise claim;
+- one example that clarifies a definition;
+- one contrast between easily confused concepts.
+
+Definitions may include a short example where this improves understanding. Avoid splitting a tightly connected fact into fragments that become meaningless without each other.
+
+### Technical or scientific material
+
+Test the important relationship, mechanism, assumption, equation, or interpretation—not merely isolated terminology.
+
+Use separate cards only when the components are independently useful. Preserve qualifiers, conditions, directionality, and causal distinctions from the source.
+
+### Concepts, arguments, and essays
+
+Prefer broader cards that preserve the central idea and its reasoning. Appropriate prompts include:
+
+- What is the author's central claim?
+- Why does the author argue that X leads to Y?
+- How does the source distinguish X from Y?
+- What problem does the concept address?
+- What example or reasoning supports the claim?
+
+Do not over-atomise an argument into disconnected sentence fragments.
+
+### Processes, sequences, and progressions
+
+Test either:
+
+- the overall process and its purpose;
+- the relationship between major stages; or
+- a meaningful sequence of steps.
+
+Cloze cards may be used when recalling the ordering or linkage of key stages is the learning objective.
+
+### Historical and biographical material
+
+Prioritise causal relationships, significance, chronology, and connections between people or events. Use atomic cards for important dates or identities only when those details are intrinsically useful.
+
+### Narrative, anecdotes, and stories
+
+Prefer one or two broader basic cards covering:
+
+- what happened;
+- why it mattered;
+- the turning point;
+- the lesson, theme, or implication; or
+- the relationship between the principal people or events.
+
+Preserve enough context that the story remains coherent. Do not produce many cards for incidental details.
+
+### Quotations
+
+Test the idea, interpretation, speaker, or significance of the quotation when supported by the highlight. Do not create a cloze card merely by deleting arbitrary words from a quotation.
+
+### Poetry
+
+If the material is recognisably a poem or an excerpt from one:
+
+1. Create one `basic` card with the poem's title and author on the front and the poem on the back.
+2. Include the full poem only if it is contained in the supplied material and is reasonably short. Never reconstruct missing lines from memory or outside knowledge.
+3. If only an excerpt is supplied, label it clearly as an excerpt on both the front and back where appropriate.
+4. If the title or author cannot be established from the supplied metadata or text, use only the information that is known; do not guess.
+5. You may additionally create cloze cards for memorisation. Each cloze deletion should normally conceal an entire stanza, paragraph, verse block, or other meaningful poetic unit—not isolated words.
+6. Preserve the poem's original line breaks and stanza structure.
+7. For a long poem, use the supplied excerpt or a coherent selection rather than placing an impractically long work on one card.
+8. Poetry cards may exceed the usual answer-length preference when necessary to preserve the passage.
+
+## Choosing Basic vs. Cloze
+
+Choose the format that best matches the learning objective.
+
+Use `basic` when:
+
+- the learner should explain, identify, compare, interpret, or summarise;
+- the material requires a genuine question;
+- context is needed for the answer to make sense;
+- the card tests an argument, mechanism, story, or broader concept.
+
+Use `cloze` when:
+
+- the text forms a natural, self-contained statement;
+- the goal is to recall a key term, precise relationship, sequence, or poetic block;
+- one to three deletions can be made without making the remaining text ambiguous.
+
+For ordinary prose, prefer one conceptual target per cloze note. Multiple deletions may share the same cloze number when they form one inseparable answer. Do not blank so much text that the learner lacks a useful retrieval cue.
+
+For poetry, an entire stanza or meaningful block may be enclosed in a single cloze deletion.
+
+## Output format
+
+Return valid JSON only. Do not include Markdown fences, commentary, or text outside the JSON.
+
+Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. Include only the fields appropriate to the selected `card_type`.
+
+Use short, general-purpose tags. Do not invent highly specific tags from uncertain context.
+
 {
+  "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
   "cards": [
     {
       "card_type": "basic",
-      "front": "Clear, specific question",
-      "back": "Complete answer",
-      "core_concept": "Main concept the highlight captures",
+      "front": "Clear, specific, independently understandable question",
+      "back": "Concise but complete answer",
+      "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["tag1", "tag2"]
     },
     {
       "card_type": "cloze",
-      "cloze_text": {% raw %}"Text with {{c1::a cloze deletion}} in it"{% endraw %},
-      "extra": "Additional context or explanation",
-      "core_concept": "Main concept the highlight captures",
+      "cloze_text": "Self-contained text with {{c1::a meaningful deletion}}",
+      "extra": "Optional brief context or explanation",
+      "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["tag1", "tag2"]
     }
   ]
 }
-```
 
-Generate the flashcards now:
+Generate the flashcards now.
