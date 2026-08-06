@@ -29,6 +29,26 @@ def test_anthropic_provider_initializes_chat_anthropic(tmp_path, monkeypatch):
         assert kwargs["max_tokens"]
 
 
+def test_anthropic_default_max_tokens_is_generous(tmp_path, monkeypatch):
+    """Defaults to a larger budget than a typical non-reasoning model needs -
+    models that reject temperature (reasoning-first models) can consume part
+    of max_tokens on internal reasoning before emitting the visible answer."""
+    monkeypatch.chdir(tmp_path)
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic:
+        LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        _, kwargs = mock_chat_anthropic.call_args
+        assert kwargs["max_tokens"] >= 8192
+
+
+def test_anthropic_explicit_max_tokens_still_wins(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = LLMConfig(provider="anthropic", model="claude-sonnet-5", api_key="dummy", max_tokens=2048)
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic:
+        LLMProvider(config)
+        _, kwargs = mock_chat_anthropic.call_args
+        assert kwargs["max_tokens"] == 2048
+
+
 def test_unsupported_provider_raises(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ValueError, match="Unsupported provider"):
@@ -68,6 +88,26 @@ def test_extract_text_content_joins_multiple_text_blocks():
 def test_extract_text_content_ignores_non_text_blocks_entirely():
     content = [{"type": "redacted_thinking", "data": "..."}, {"type": "tool_use", "input": {}}]
     assert _extract_text_content(content) == ""
+
+
+def test_extract_text_content_warns_when_result_is_empty_but_content_wasnt(caplog):
+    """Reproduces a real failure: a successful (200 OK) call whose content was
+    entirely thinking/reasoning blocks with no text block - previously this
+    silently produced an empty string and the caller only ever saw a
+    downstream 'Expecting value: line 1 column 1' JSON error with no clue why."""
+    content = [{"type": "thinking", "thinking": "reasoning with no final answer emitted..."}]
+    with caplog.at_level("WARNING", logger="pdf2anki.llm"):
+        result = _extract_text_content(content)
+
+    assert result == ""
+    assert any("no text content blocks" in record.message for record in caplog.records)
+    assert any("thinking" in record.message for record in caplog.records)
+
+
+def test_extract_text_content_does_not_warn_for_empty_list():
+    # Genuinely empty content (not "content with no text blocks") shouldn't
+    # trigger the diagnostic warning - there's nothing to explain.
+    assert _extract_text_content([]) == ""
 
 
 def test_generate_handles_list_content_from_structured_response(tmp_path, monkeypatch):

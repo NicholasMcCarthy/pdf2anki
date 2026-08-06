@@ -55,7 +55,19 @@ def _extract_text_content(content: Any) -> str:
                 parts.append(block)
             elif isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
-        return "".join(parts)
+        result = "".join(parts)
+        if not result and content:
+            # A successful (200 OK) call that nonetheless yields no usable text -
+            # e.g. every block was "thinking"/reasoning with none marked "text".
+            # Surface exactly what came back rather than let the caller see only
+            # a downstream "Expecting value" JSON error with no clue why.
+            block_types = [b.get("type") if isinstance(b, dict) else type(b).__name__ for b in content]
+            logger.warning(
+                f"LLM response had no text content blocks (block types: {block_types}) - "
+                f"returning empty string. If this recurs, the model may be exhausting "
+                f"max_tokens on internal reasoning before emitting an answer."
+            )
+        return result
     return str(content)
 
 
@@ -106,10 +118,16 @@ class LLMProvider:
                 **temperature_kwargs,
             )
         elif self.config.provider == "anthropic":
-            # Anthropic requires an explicit max_tokens (unlike OpenAI, None isn't accepted).
+            # Anthropic requires an explicit max_tokens (unlike OpenAI, None isn't
+            # accepted). Default raised from 4096: models that reject `temperature`
+            # (see _rejects_temperature() above) are consistent with reasoning-first
+            # models whose internal reasoning counts against the same output token
+            # budget as the visible answer - a small max_tokens risks the budget
+            # being fully consumed before any answer text is emitted, producing an
+            # empty response that still parses as a successful (200 OK) API call.
             return ChatAnthropic(
                 model=self.config.model,
-                max_tokens=self.config.max_tokens or 4096,
+                max_tokens=self.config.max_tokens or 8192,
                 anthropic_api_key=self.config.api_key,
                 anthropic_api_url=self.config.base_url,
                 timeout=self.config.timeout,
