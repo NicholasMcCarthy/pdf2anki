@@ -133,6 +133,36 @@ def test_generate_handles_list_content_from_structured_response(tmp_path, monkey
     assert response.content == '{"cards": [{"front": "Q", "back": "A"}]}'
 
 
+def test_generate_logs_diagnostics_for_empty_string_content(tmp_path, monkeypatch, caplog):
+    """Reproduces a real failure that the list-content fix doesn't cover:
+    response.content itself is a plain empty string (not a list with no text
+    blocks), so _extract_text_content's own diagnostic never fires. generate()
+    must log the full response (content, response_metadata, usage_metadata)
+    so an empty-response failure is diagnosable without raw HTTP debug logs."""
+    monkeypatch.chdir(tmp_path)
+
+    empty_response = Mock(
+        content="",
+        response_metadata={"stop_reason": "max_tokens", "usage": {"output_tokens": 8192}},
+        usage_metadata={"output_tokens": 8192},
+    )
+
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls:
+        client = Mock()
+        client.invoke.return_value = empty_response
+        mock_chat_anthropic_cls.return_value = client
+
+        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        with caplog.at_level("WARNING", logger="pdf2anki.llm"):
+            with pytest.raises(ValueError, match="Failed to get valid JSON"):
+                provider.generate(prompt="test", json_mode=True, max_retries=0)
+
+    diagnostic_logs = [r.message for r in caplog.records if "empty response body" in r.message]
+    assert len(diagnostic_logs) == 1
+    assert "max_tokens" in diagnostic_logs[0]
+    assert "stop_reason" in diagnostic_logs[0]
+
+
 def test_rejects_temperature_detects_anthropic_error_message():
     error = Exception(
         "Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "

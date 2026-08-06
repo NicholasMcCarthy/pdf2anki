@@ -197,6 +197,21 @@ class LLMProvider:
                 # a list of content blocks instead - normalize before any string use.
                 response_text = _extract_text_content(response.content)
 
+                if not response_text.strip():
+                    # Empty response text with no diagnostic already logged by
+                    # _extract_text_content (that only fires for a non-empty list
+                    # with no text blocks) - most likely response.content was
+                    # already an empty string. Log everything the AIMessage
+                    # carries about *why* - stop_reason/usage in response_metadata
+                    # is the key signal (e.g. "max_tokens" = truncated before any
+                    # output, vs "end_turn" = the model deliberately said nothing).
+                    logger.warning(
+                        f"LLM returned an empty response body on a successful call. "
+                        f"content={response.content!r} "
+                        f"response_metadata={getattr(response, 'response_metadata', None)!r} "
+                        f"usage_metadata={getattr(response, 'usage_metadata', None)!r}"
+                    )
+
                 # Validate JSON if requested
                 if json_mode:
                     try:
