@@ -1,26 +1,16 @@
-You are analysing a single highlight saved from "{{ pdf_title }}"{% if author %} by {{ author }}{% endif %}. The source may be a web article, book, paper, reference work, poem, story, essay, or other learning material saved through Readwise.
+You are analysing ALL the highlights the reader saved from "{{ pdf_title }}"{% if author %} by {{ author }}{% endif %} - a web article, book, paper, reference work, poem, story, essay, or other learning material saved through Readwise.
 
-**Primary highlight**:
+**Highlights** ({{ highlight_count | default(1) }} total - each is numbered `[HIGHLIGHT N]`; a `[NOTE N]` line directly below one is the reader's own annotation on that specific highlight):
+
 {{ chunk }}
-
-{% if "[NOTE]" in chunk %}
-A line beginning with `[NOTE]` is the reader's own annotation. Use it to understand why the material matters to them and what should be emphasised, but distinguish the annotation from the source text.
-{% endif %}
-
-{% if other_highlights %}
-**Other highlights from the same source**:
-{{ other_highlights }}
-
-These are supplied only to help identify the source type and understand the surrounding context. Unless applying the special poetry instructions below, do not create a card whose tested content comes only from these contextual highlights.
-{% endif %}
 
 ---
 
 ## Task
 
-Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards based on the primary highlight.
+Generate up to {{ max_cards | default(2) }} high-quality Anki flashcards for EACH highlight above, grounded in that highlight's own text (and its note, if present). Across all {{ highlight_count | default(1) }} highlights that's a soft budget of roughly {{ (max_cards | default(2)) * (highlight_count | default(1)) }} cards total - fewer is completely fine if the material doesn't support that many good cards.
 
-Before generating cards, classify the highlighted material into the most appropriate content type:
+Before generating cards for a highlight, classify its material into the most appropriate content type:
 
 - `definition`
 - `factual`
@@ -36,20 +26,20 @@ Before generating cards, classify the highlighted material into the most appropr
 - `quotation`
 - `other`
 
-Use this classification to determine the appropriate card style and level of granularity.
+Use this classification to determine the appropriate card style and level of granularity for that highlight's cards.
 
 ## General requirements
 
-1. Every tested claim, fact, definition, relationship, or passage must be supported by the primary highlight.
-2. Use the reader's `[NOTE]`, when present, to guide emphasis and interpretation.
+1. Every tested claim, fact, definition, relationship, or passage must be supported by its OWN highlight (and note, if present) - do not test something that isn't actually in it.
+2. Use each highlight's `[NOTE N]`, when present, to guide emphasis and interpretation of that highlight.
 3. You may add brief, reliable background context—such as expanding an acronym or identifying a broader field—but do not introduce unsupported claims or turn outside knowledge into the object being tested.
-4. Use other highlights only for contextual interpretation, not as independent card material, except where they clearly form part of the same poem under the poetry rules.
-5. Do not generate multiple cards that test essentially the same information.
+4. Use the other highlights in the list purely as narrative background to understand the source as a whole - every card must still be grounded in its own highlight, not borrowed from a different one, except where several highlights clearly form part of the same poem under the poetry rules below.
+5. Do not generate multiple cards that test essentially the same information, whether within one highlight or across several.
 6. Keep answers concise enough for efficient recall, while retaining the context needed to make the card meaningful.
 7. Make each card understandable without requiring the learner to reopen the source.
 8. Avoid vague prompts such as “What does this say?” or questions that merely ask the learner to repeat an arbitrary sentence.
-9. If the material is too vague, fragmentary, dependent on missing context, or not worth memorising, return an empty `cards` array.
-10. Treat `{{ max_cards | default(2) }}` as a maximum, not a target. Generate only cards that are genuinely useful.
+9. Skip any highlight that's too vague, fragmentary, dependent on missing context, or not worth memorising - do not pad, and it's fine for the returned "cards" array to be shorter than the soft budget (or empty) if the highlights don't support more.
+10. Treat the per-highlight budget of {{ max_cards | default(2) }} as a maximum, not a target. Generate only cards that are genuinely useful.
 
 ## Card strategy by content type
 
@@ -115,7 +105,7 @@ Test the idea, interpretation, speaker, or significance of the quotation when su
 
 ### Poetry
 
-If the material is recognisably a poem or an excerpt from one:
+If a highlight is recognisably a poem or an excerpt from one:
 
 1. Create one `basic` card with the poem's title and author on the front and the poem on the back.
 2. Include the full poem only if it is contained in the supplied material and is reasonably short. Never reconstruct missing lines from memory or outside knowledge.
@@ -125,6 +115,7 @@ If the material is recognisably a poem or an excerpt from one:
 6. Preserve the poem's original line breaks and stanza structure.
 7. For a long poem, use the supplied excerpt or a coherent selection rather than placing an impractically long work on one card.
 8. Poetry cards may exceed the usual answer-length preference when necessary to preserve the passage.
+9. If the same poem spans several consecutive `[HIGHLIGHT N]` blocks, treat them together as one poem for the purposes of this section rather than generating a separate poem card per highlight.
 
 ## Choosing Basic vs. Cloze
 
@@ -156,20 +147,21 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
 Use short, general-purpose tags. Do not invent highly specific tags from uncertain context.
 
 {
-  "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
   "cards": [
     {
       "card_type": "basic",
       "front": "Clear, specific, independently understandable question",
       "back": "Concise but complete answer",
+      "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
       "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["tag1", "tag2"]
     },
     {
       "card_type": "cloze",
-      "cloze_text": "Self-contained text with {{c1::a meaningful deletion}}",
+      "cloze_text": {% raw %}"Self-contained text with {{c1::a meaningful deletion}}"{% endraw %},
       "extra": "Optional brief context or explanation",
+      "content_type": "definition|factual|technical|conceptual|argument|process|comparison|historical|biographical|narrative|poetry|quotation|other",
       "core_concept": "The main knowledge or understanding being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["tag1", "tag2"]

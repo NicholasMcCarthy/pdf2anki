@@ -79,7 +79,10 @@ def test_extract_pdf_content_without_annotations_flag_skips_annotations(highligh
     assert content["annotations"] == []
 
 
-def test_chunk_by_highlights_groups_by_page_with_context(highlighted_pdf):
+def test_chunk_by_highlights_single_call_inlines_highlight_at_page_position(highlighted_pdf):
+    """A short paper (<= single_call_max_pages, default 12) is sent as a single
+    whole-paper chunk with highlight markers inserted inline at their real
+    page position - see chunking.py:_build_single_paper_chunk."""
     content = extract_pdf_content(highlighted_pdf, extract_images=False, extract_annotations=True)
     chunker = TextChunker(Chunking(mode=ChunkingMode.HIGHLIGHTS))
     chunks = chunker.chunk_document(content)
@@ -90,10 +93,10 @@ def test_chunk_by_highlights_groups_by_page_with_context(highlighted_pdf):
     assert chunk.highlights and len(chunk.highlights) == 1
     assert "[HIGHLIGHT" in chunk.text
     assert "[NOTE]: key mechanism" in chunk.text
-    assert "[PAGE CONTEXT]" in chunk.text
+    assert "[PAGE 1]" in chunk.text
 
 
-def test_chunk_by_highlights_falls_back_to_smart_when_no_annotations(tmp_path):
+def test_chunk_by_highlights_single_call_when_no_annotations(tmp_path):
     path = tmp_path / "plain.pdf"
     doc = fitz.open()
     page = doc.new_page()
@@ -107,6 +110,7 @@ def test_chunk_by_highlights_falls_back_to_smart_when_no_annotations(tmp_path):
     chunker = TextChunker(Chunking(mode=ChunkingMode.HIGHLIGHTS))
     chunks = chunker.chunk_document(content)
 
-    # Falls back to smart chunking rather than producing nothing.
+    # Still a single whole-paper chunk (a short paper always is), just with no
+    # highlight markers/screenshots attached.
     assert len(chunks) >= 1
     assert chunks[0].chunk_type == "text"

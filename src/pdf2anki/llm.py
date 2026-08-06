@@ -111,7 +111,10 @@ class LLMProvider:
         self.total_cost = 0.0
         self.cache_hits = 0
         self.api_calls = 0
-        self._omit_temperature = False
+        # Proactive: known non-supporting models (see ModelRegistry.MODELS)
+        # never make a wasted first call. generate()'s reactive
+        # _rejects_temperature() fallback still covers anything uncatalogued.
+        self._omit_temperature = not ModelRegistry.supports_temperature(config.model)
 
         # Set up caching
         cache_path = ".llm_cache/langchain.db"
@@ -356,6 +359,14 @@ class LLMProvider:
 class ModelRegistry:
     """Registry of supported models with metadata."""
     
+    # supports_temperature: whether this model accepts the `temperature`
+    # request param at all (some reasoning-first models reject it outright,
+    # e.g. Anthropic's 400 "`temperature` is deprecated for this model" - see
+    # _rejects_temperature() below). Missing/uncatalogued models default to
+    # True via supports_temperature() - _rejects_temperature()'s reactive
+    # fallback in generate() remains the safety net for anything not listed
+    # here, so a new/unrecognized model still self-heals after one failed
+    # call instead of needing a registry update to work at all.
     MODELS = {
         "gpt-4-1106-preview": {
             "provider": "openai",
@@ -364,6 +375,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.03,
             "supports_json": True,
             "supports_seed": True,
+            "supports_temperature": True,
         },
         "gpt-4": {
             "provider": "openai",
@@ -372,6 +384,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.06,
             "supports_json": False,
             "supports_seed": False,
+            "supports_temperature": True,
         },
         "gpt-3.5-turbo": {
             "provider": "openai",
@@ -380,6 +393,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.002,
             "supports_json": True,
             "supports_seed": False,
+            "supports_temperature": True,
         },
         "claude-opus-5": {
             "provider": "anthropic",
@@ -388,6 +402,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.075,
             "supports_json": False,
             "supports_seed": False,
+            "supports_temperature": False,
         },
         "claude-sonnet-5": {
             "provider": "anthropic",
@@ -396,6 +411,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.015,
             "supports_json": False,
             "supports_seed": False,
+            "supports_temperature": False,
         },
         "claude-haiku-4-5-20251001": {
             "provider": "anthropic",
@@ -404,9 +420,16 @@ class ModelRegistry:
             "output_cost_per_1k": 0.005,
             "supports_json": False,
             "supports_seed": False,
+            "supports_temperature": False,
         },
     }
-    
+
+    @classmethod
+    def supports_temperature(cls, model_name: str) -> bool:
+        """Whether `model_name` accepts the `temperature` param. Defaults to
+        True for any model not in MODELS - see the class-level comment above."""
+        return cls.MODELS.get(model_name, {}).get("supports_temperature", True)
+
     @classmethod
     def get_model_info(cls, model_name: str) -> Dict[str, Any]:
         """Get information about a model."""

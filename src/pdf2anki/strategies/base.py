@@ -45,6 +45,18 @@ def infer_card_type(card_data: Dict[str, Any]) -> str:
     return "cloze" if card_data.get("cloze_text") else "basic"
 
 
+def default_page_citation(chunk: "TextChunk") -> str:
+    """"p. N" for a single-page chunk, "pp. N-M" for one spanning multiple
+    pages - the efficiency-focused academic-paper chunking (whole-paper
+    single-call for short papers, page-range smart-chunks for long ones - see
+    chunking.py:_chunk_by_highlights) means a chunk is no longer reliably one
+    page, so a bare "p. {start_page}" fallback would misreport the source for
+    any card whose highlight came from elsewhere in a multi-page chunk."""
+    if chunk.start_page == chunk.end_page:
+        return f"p. {chunk.start_page}"
+    return f"pp. {chunk.start_page}-{chunk.end_page}"
+
+
 @dataclass
 class FlashcardData:
     """Base flashcard data structure."""
@@ -147,7 +159,7 @@ class BaseStrategy(ABC):
                 "pdf_title": pdf_metadata.get("title", "Unknown"),
                 "author": pdf_metadata.get("author", ""),
                 "abstract": pdf_metadata.get("abstract", ""),
-                "other_highlights": pdf_metadata.get("other_highlights", ""),
+                "highlight_count": pdf_metadata.get("highlight_count"),
                 "strategy": self.name,
                 "max_cards": max_cards,
                 **self.config.params
@@ -195,7 +207,7 @@ class BaseStrategy(ABC):
                 # Page-based citation is the sensible default for PDF-derived chunks;
                 # a strategy may pre-set ref_citation in parse_cards() instead (e.g.
                 # ReadwiseHighlightStrategy citing a source URL), which wins here.
-                card.ref_citation = card.ref_citation or f"p. {chunk.start_page}"
+                card.ref_citation = card.ref_citation or default_page_citation(chunk)
                 card.llm_model = self.llm_provider.config.model
                 card.strategy = self.name
                 card.template_version = self.config.template_version

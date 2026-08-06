@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from pdf2anki.chunking import TextChunk
 from pdf2anki.prompts import create_prompt_manager
+from pdf2anki.strategies.base import default_page_citation
 from pdf2anki.strategies.highlight_priority import HighlightPriorityStrategy
 
 
@@ -107,7 +108,7 @@ def test_prompt_includes_abstract_when_present():
 
     prompt_arg = strategy.llm_provider.generate.call_args.kwargs["prompt"]
     assert "This paper studies photosynthesis." in prompt_arg
-    assert "Paper Abstract" in prompt_arg
+    assert "Paper abstract" in prompt_arg
 
 
 def test_prompt_omits_abstract_section_when_absent():
@@ -118,7 +119,7 @@ def test_prompt_omits_abstract_section_when_absent():
     strategy.generate_cards(chunk, pdf_metadata={"title": "Test", "path": "test.pdf"}, max_cards=5)
 
     prompt_arg = strategy.llm_provider.generate.call_args.kwargs["prompt"]
-    assert "Paper Abstract" not in prompt_arg
+    assert "Paper abstract" not in prompt_arg
 
 
 def test_validate_response_accepts_cloze_card_with_card_type():
@@ -178,3 +179,43 @@ def test_parse_cards_skips_invalid_cloze_format():
     cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
 
     assert cards == []
+
+
+def test_default_page_citation_single_page():
+    chunk = TextChunk(text="x", start_page=5, end_page=5)
+    assert default_page_citation(chunk) == "p. 5"
+
+
+def test_default_page_citation_multi_page():
+    chunk = TextChunk(text="x", start_page=3, end_page=9)
+    assert default_page_citation(chunk) == "pp. 3-9"
+
+
+def test_parse_cards_falls_back_to_page_range_citation_for_multi_page_chunk():
+    """A chunk spanning multiple pages (e.g. a whole-paper single-call chunk
+    or a smart-chunk-with-highlights chunk) should get a "pp. N-M" fallback
+    citation, not a misleading bare "p. {start_page}"."""
+    strategy = _make_strategy()
+    chunk = TextChunk(
+        text="[HIGHLIGHT - nick]: some text\n\n[PAGE CONTEXT]:\nmore text",
+        start_page=3,
+        end_page=7,
+        chunk_type="highlight",
+        highlights=[{"page_num": 4, "text": "some text"}],
+    )
+
+    response_data = {"cards": [{"front": "Q1", "back": "A1", "core_concept": "X"}]}
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert len(cards) == 1
+    assert cards[0].page_citation == "pp. 3-7"
+
+
+def test_parse_cards_keeps_single_page_citation_for_single_page_chunk():
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {"cards": [{"front": "Q1", "back": "A1", "core_concept": "X"}]}
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].page_citation == "p. 1"

@@ -1,4 +1,4 @@
-You are analysing highlighted and annotated excerpts from the academic paper "{{ pdf_title }}" (page {{ page_start }}).
+You are analysing highlighted and annotated excerpts from the academic paper "{{ pdf_title }}"{% if page_end and page_end != page_start %} (pages {{ page_start }}-{{ page_end }}){% else %} (page {{ page_start }}){% endif %}.
 
 {% if author %}
 **Author(s)**: {{ author }}
@@ -15,7 +15,7 @@ Use the abstract to understand the paper's domain, research question, contributi
 
 - `[HIGHLIGHT]` marks text deliberately selected by the reader.
 - `[NOTE]` marks the reader's own annotation or assessment.
-- `[PAGE CONTEXT]` provides surrounding text for interpretation and disambiguation only.
+- Surrounding page text is included only for disambiguation - either inline per page (`[PAGE N]:`) when the whole paper is supplied as one chunk, or as a single `[PAGE CONTEXT]:` block when this chunk was drawn from a longer paper and may itself span more than one page.
 
 {{ chunk }}
 
@@ -113,7 +113,7 @@ When a finding is specific to this paper, signal that explicitly with wording su
 1. The `[HIGHLIGHT]` passages are the primary source of card content.
 2. Use `[NOTE]` annotations to determine why a passage was selected and what should be emphasised.
 3. Use the abstract to identify the paper's domain, central problem, and contribution.
-4. Use `[PAGE CONTEXT]` only to resolve references, expand incomplete sentences, identify the relevant domain, or make a highlighted idea intelligible.
+4. Use the surrounding page text (`[PAGE N]` or `[PAGE CONTEXT]`) only to resolve references, expand incomplete sentences, identify the relevant domain, or make a highlighted idea intelligible.
 5. Do not create a card whose tested claim comes only from the abstract or page context.
 6. You may add brief, reliable background knowledge to clarify terminology, but it must not replace or materially extend the highlighted claim.
 7. If context cannot resolve an ambiguous or fragmentary highlight, do not generate a card from it.
@@ -170,14 +170,14 @@ For a cloze card, include it at the end of `extra`.
 Use this format:
 
 {% if author %}
-"Source: {{ author }}, {{ pdf_title }}, p. {{ page_start }}."
+"Source: {{ author }}, {{ pdf_title }}, {% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}."
 {% else %}
-"Source: {{ pdf_title }}, p. {{ page_start }}."
+"Source: {{ pdf_title }}, {% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}."
 {% endif %}
 
 Do not put the reference in the question or cloze text unless identifying the paper is itself part of the learning objective.
 
-Also retain the structured `page_citation` field for indexing.
+Also retain the structured `page_citation` field for indexing - use {% if page_end and page_end != page_start %}"pp. {{ page_start }}-{{ page_end }}" if the card's source isn't clearly on one page, otherwise the specific page it came from{% else %}"p. {{ page_start }}"{% endif %}.
 
 ## Output format
 
@@ -200,7 +200,7 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
       "card_type": "basic",
       "front": "Specific, contextualised, independently understandable question",
       "back": "Concise but complete answer, including essential qualifications. Source: Paper reference, p. X.",
-      "page_citation": "p. {{ page_start }}",
+      "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
       "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",
@@ -208,9 +208,9 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
     },
     {
       "card_type": "cloze",
-      "cloze_text": "Within a clearly specified domain or setting, {{c1::the meaningful concept or relationship}}.",
+      "cloze_text": {% raw %}"Within a clearly specified domain or setting, {{c1::the meaningful concept or relationship}}."{% endraw %},
       "extra": "Brief explanation or qualification. Source: Paper reference, p. X.",
-      "page_citation": "p. {{ page_start }}",
+      "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
       "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",

@@ -74,6 +74,21 @@ def test_model_registry_has_anthropic_models():
     assert info.get("provider") == "anthropic"
 
 
+def test_supports_temperature_false_for_catalogued_non_supporting_model():
+    assert ModelRegistry.supports_temperature("claude-sonnet-5") is False
+
+
+def test_supports_temperature_true_for_catalogued_supporting_model():
+    assert ModelRegistry.supports_temperature("gpt-4") is True
+
+
+def test_supports_temperature_defaults_true_for_uncatalogued_model():
+    # Unknown models default to "supports temperature" so the reactive
+    # _rejects_temperature() fallback in generate() is what covers them,
+    # not a proactive (and potentially wrong) omission.
+    assert ModelRegistry.supports_temperature("some-brand-new-model") is True
+
+
 def test_extract_text_content_passes_through_plain_string():
     assert _extract_text_content("hello") == "hello"
 
@@ -223,18 +238,34 @@ def test_rejects_temperature_ignores_unrelated_errors():
     assert _rejects_temperature(Exception("temperature must be between 0 and 1")) is False
 
 
-def test_first_call_includes_temperature_by_default(tmp_path, monkeypatch):
+def test_first_call_omits_temperature_for_known_non_supporting_model(tmp_path, monkeypatch):
+    """claude-sonnet-5 is catalogued in ModelRegistry as not supporting
+    temperature - the first call should proactively omit it rather than
+    waiting for a rejection and retrying."""
     monkeypatch.chdir(tmp_path)
     with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic:
         LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        _, kwargs = mock_chat_anthropic.call_args
+        assert "temperature" not in kwargs
+
+
+def test_first_call_includes_temperature_for_uncatalogued_model(tmp_path, monkeypatch):
+    """A model ModelRegistry doesn't know about defaults to supporting
+    temperature, so the first call still includes it - the reactive
+    _rejects_temperature() fallback in generate() covers the rest."""
+    monkeypatch.chdir(tmp_path)
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic:
+        LLMProvider(_make_config("anthropic", model="claude-future-model-x"))
         _, kwargs = mock_chat_anthropic.call_args
         assert "temperature" in kwargs
 
 
 def test_generate_recovers_by_omitting_temperature_and_retries_immediately(tmp_path, monkeypatch):
-    """Simulates the real failure mode: the model rejects `temperature` on the
-    first call. The provider should rebuild its client without it and retry
-    immediately (no sleep - this isn't a transient error)."""
+    """Simulates the real failure mode for a model ModelRegistry doesn't know
+    about yet (so temperature isn't proactively omitted): the model rejects
+    `temperature` on the first call. The provider should rebuild its client
+    without it and retry immediately (no sleep - this isn't a transient
+    error)."""
     monkeypatch.chdir(tmp_path)
 
     temp_rejected_error = Exception(
@@ -250,7 +281,7 @@ def test_generate_recovers_by_omitting_temperature_and_retries_immediately(tmp_p
         second_client.invoke.return_value = success_response
         mock_chat_anthropic_cls.side_effect = [first_client, second_client]
 
-        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        provider = LLMProvider(_make_config("anthropic", model="claude-future-model-x"))
         response = provider.generate(prompt="test prompt", max_retries=3)
 
     assert response.content == '{"cards": []}'
@@ -281,7 +312,7 @@ def test_generate_does_not_loop_forever_if_temperature_rejection_persists(tmp_pa
         always_failing_client.invoke.side_effect = temp_rejected_error
         mock_chat_anthropic_cls.return_value = always_failing_client
 
-        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        provider = LLMProvider(_make_config("anthropic", model="claude-future-model-x"))
         with pytest.raises(Exception):
             provider.generate(prompt="test prompt", max_retries=1)
 

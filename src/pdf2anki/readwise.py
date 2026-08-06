@@ -177,49 +177,29 @@ def _parse_highlights(body: str) -> List[ReadwiseHighlight]:
     return highlights
 
 
-def _build_other_highlights_context(doc: ReadwiseDocument, exclude_index: int, max_chars: int = 1500) -> str:
-    """Join the OTHER highlights in this document (excluding the one currently
-    being turned into cards) into a short bulleted list, for use as background
-    context in the per-highlight prompt - see process_readwise_document(). This
-    lets the LLM understand the surrounding argument/narrative of a multi-highlight
-    article without grounding cards in anything that wasn't itself highlighted.
+def readwise_document_to_single_chunk(doc: ReadwiseDocument) -> TextChunk:
+    """Batch every highlight (and its note, if any) into ONE chunk - numbered
+    [HIGHLIGHT N]/[NOTE N] blocks - for a single generate_cards() call instead
+    of one call per highlight. Replaces the old per-highlight chunking (and
+    the "other highlights as context" mechanism that existed only to work
+    around N separate calls not seeing each other) with a single call that
+    simply has everything present at once.
     """
-    parts: List[str] = []
-    total_len = 0
-    for i, highlight in enumerate(doc.highlights):
-        if i == exclude_index:
-            continue
-        snippet = highlight.text.strip().replace("\n", " ")
-        if len(snippet) > 300:
-            snippet = snippet[:300].rstrip() + "..."
-        line = f"- {snippet}"
-        if total_len + len(line) > max_chars:
-            break
-        parts.append(line)
-        total_len += len(line)
-    return "\n".join(parts)
-
-
-def readwise_document_to_chunks(doc: ReadwiseDocument) -> List[TextChunk]:
-    """Turn each highlight into its own chunk so per-highlight metadata (note)
-    survives into card generation - each highlight is treated as its own
-    atomic unit rather than merged with others in the same document.
-    """
-    chunks = []
-    for i, highlight in enumerate(doc.highlights):
-        text = highlight.text
+    parts = []
+    for i, highlight in enumerate(doc.highlights, start=1):
+        block = f"[HIGHLIGHT {i}]: {highlight.text}"
         if highlight.note:
-            text += f"\n\n[NOTE]: {highlight.note}"
+            block += f"\n[NOTE {i}]: {highlight.note}"
+        parts.append(block)
 
-        chunks.append(TextChunk(
-            text=text,
-            start_page=0,
-            end_page=0,
-            section=doc.title,
-            chunk_index=i,
-            total_chunks=len(doc.highlights),
-        ))
-    return chunks
+    return TextChunk(
+        text="\n\n".join(parts),
+        start_page=0,
+        end_page=0,
+        section=doc.title,
+        chunk_index=0,
+        total_chunks=1,
+    )
 
 
 def process_readwise_document(
@@ -229,8 +209,9 @@ def process_readwise_document(
     strategy_config: Optional[StrategyConfig] = None,
     max_cards_per_highlight: int = 2,
 ) -> List[FlashcardData]:
-    """Parse a Readwise markdown export and generate one flashcard-call per
-    highlight via ReadwiseHighlightStrategy, returning the combined cards.
+    """Parse a Readwise markdown export and generate cards for ALL of its
+    highlights in a single ReadwiseHighlightStrategy call, instead of one call
+    per highlight - see readwise_document_to_single_chunk().
     """
     if strategy_config is None:
         strategy_config = StrategyConfig(
@@ -249,7 +230,7 @@ def process_readwise_document(
         logger.info(f"No highlights found in {path}, skipping")
         return []
 
-    chunks = readwise_document_to_chunks(doc)
+    chunk = readwise_document_to_single_chunk(doc)
 
     pdf_metadata = {
         "title": doc.title,
@@ -258,15 +239,15 @@ def process_readwise_document(
         "source_url": doc.url or "",
         "category": doc.category,
         "extra_tags": doc.tags,
+        "highlight_count": len(doc.highlights),
     }
 
-    all_cards: List[FlashcardData] = []
-    for i, chunk in enumerate(chunks):
-        chunk_metadata = dict(pdf_metadata)
-        if len(doc.highlights) > 1:
-            chunk_metadata["other_highlights"] = _build_other_highlights_context(doc, exclude_index=i)
-        cards = strategy.generate_cards(chunk, chunk_metadata, max_cards=max_cards_per_highlight)
-        all_cards.extend(strategy.deduplicate_cards(cards))
+    # `max_cards` here is deliberately the PER-highlight cap (matching the
+    # template's own "up to N cards per highlight" framing), not a per-call
+    # total like every other strategy's use of generate_cards(max_cards=...) -
+    # the template multiplies it out into a soft total budget itself.
+    cards = strategy.generate_cards(chunk, pdf_metadata, max_cards=max_cards_per_highlight)
+    all_cards = strategy.deduplicate_cards(cards)
 
-    logger.info(f"Generated {len(all_cards)} cards from {len(chunks)} highlights in {path}")
+    logger.info(f"Generated {len(all_cards)} cards from {len(doc.highlights)} highlights in {path} (1 call)")
     return all_cards

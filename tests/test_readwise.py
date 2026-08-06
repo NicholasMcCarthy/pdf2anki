@@ -1,7 +1,9 @@
-"""Tests for the Readwise markdown ingestion workflow: parsing, per-highlight
-chunk construction, the ReadwiseHighlightStrategy, and the generate-readwise
-CLI command. Uses the real sample Readwise/Obsidian export the user provided
-as a fixture, plus a synthetic multi-highlight file for edge cases."""
+"""Tests for the Readwise markdown ingestion workflow: parsing, the batched
+single-chunk construction (all highlights in one LLM call - see
+readwise_document_to_single_chunk()), the ReadwiseHighlightStrategy, and the
+generate-readwise CLI command. Uses the real sample Readwise/Obsidian export
+the user provided as a fixture, plus a synthetic multi-highlight file for
+edge cases."""
 
 import json
 from pathlib import Path
@@ -17,7 +19,7 @@ from pdf2anki.prompts import create_prompt_manager
 from pdf2anki.readwise import (
     parse_readwise_markdown,
     process_readwise_document,
-    readwise_document_to_chunks,
+    readwise_document_to_single_chunk,
 )
 from pdf2anki.strategies.readwise_highlight import ReadwiseHighlightStrategy
 
@@ -89,14 +91,29 @@ def test_parses_file_with_no_highlights_section(tmp_path):
     assert doc.highlights == []
 
 
-def test_readwise_document_to_chunks_includes_note(multi_highlight_md):
+def test_readwise_document_to_single_chunk_numbers_highlights_and_notes(multi_highlight_md):
     doc = parse_readwise_markdown(multi_highlight_md)
-    chunks = readwise_document_to_chunks(doc)
+    chunk = readwise_document_to_single_chunk(doc)
 
-    assert len(chunks) == 2
-    assert "[NOTE]: This is the key mechanism" in chunks[0].text
-    assert "[NOTE]" not in chunks[1].text
-    assert chunks[0].section == "Photosynthesis Basics"
+    assert chunk.section == "Photosynthesis Basics"
+    assert chunk.total_chunks == 1
+    assert chunk.chunk_index == 0
+    assert "[HIGHLIGHT 1]: Plants convert light energy into chemical energy via photosynthesis." in chunk.text
+    assert "[NOTE 1]: This is the key mechanism I want to remember." in chunk.text
+    assert "[HIGHLIGHT 2]: The process occurs mainly in the chloroplasts of plant cells." in chunk.text
+    assert "[NOTE 2]" not in chunk.text
+    # Highlight 1's block (with its note) comes before highlight 2's.
+    assert chunk.text.index("[HIGHLIGHT 1]") < chunk.text.index("[HIGHLIGHT 2]")
+
+
+def test_readwise_document_to_single_chunk_handles_no_highlights():
+    from pdf2anki.readwise import ReadwiseDocument
+
+    doc = ReadwiseDocument(title="Empty Doc", highlights=[])
+    chunk = readwise_document_to_single_chunk(doc)
+
+    assert chunk.text == ""
+    assert chunk.section == "Empty Doc"
 
 
 def _mock_strategy() -> ReadwiseHighlightStrategy:
@@ -183,9 +200,10 @@ def test_strategy_defaults_to_basic_without_card_type():
     assert cards[0].note_type == "Basic"
 
 
-def test_process_readwise_document_threads_other_highlights_context(multi_highlight_md):
-    """A multi-highlight document should give each highlight's prompt call the
-    OTHER highlights as context, excluding its own text from that list."""
+def test_process_readwise_document_makes_exactly_one_call_with_all_highlights(multi_highlight_md):
+    """A multi-highlight document should be sent as ONE LLM call containing
+    every highlight (numbered [HIGHLIGHT N]/[NOTE N] blocks), not one call
+    per highlight."""
     captured_prompts = []
 
     def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
@@ -203,55 +221,12 @@ def test_process_readwise_document_threads_other_highlights_context(multi_highli
         llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
         process_readwise_document(multi_highlight_md, llm_provider, create_prompt_manager())
 
-    assert len(captured_prompts) == 2
-    first_prompt, second_prompt = captured_prompts
-
-    # First highlight's prompt should reference the second highlight as context...
-    assert "chloroplasts" in first_prompt
-    assert "Other highlights" in first_prompt
-    # ...but not duplicate its own highlighted text in the "other highlights" list.
-    # (its own text still appears once, in the main "Highlighted Text" section)
-    assert first_prompt.count("chemical energy via photosynthesis") == 1
-
-    # Second highlight's prompt should reference the first as context.
-    assert "chemical energy via photosynthesis" in second_prompt
-    assert "Other highlights" in second_prompt
-
-
-def test_single_highlight_document_has_no_other_highlights_section(tmp_path):
-    """A single-highlight document has nothing to use as cross-highlight
-    context, so the "Other highlights" section shouldn't appear at all."""
-    path = tmp_path / "single.md"
-    path.write_text("""---
-author: example.com
-url: https://example.com/article
----
-# Single Highlight Article
-
-## Highlights
-> [!info]
-> A single standalone highlight.
-""")
-
-    captured_prompts = []
-
-    def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
-        captured_prompts.append(prompt)
-        payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}
-        return LLMResponse(
-            content=json.dumps(payload), model=self.config.model, tokens_used=1,
-            cost_estimate=0.0, cached=False, response_time=0.0,
-        )
-
-    with patch("pdf2anki.llm.LLMProvider.generate", new=fake_generate):
-        from pdf2anki.llm import create_llm_provider
-        from pdf2anki.config import LLM as LLMConfig
-
-        llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
-        process_readwise_document(path, llm_provider, create_prompt_manager())
-
     assert len(captured_prompts) == 1
-    assert "Other highlights" not in captured_prompts[0]
+    prompt = captured_prompts[0]
+    assert "chemical energy via photosynthesis" in prompt
+    assert "chloroplasts" in prompt
+    assert "[HIGHLIGHT 1]" in prompt
+    assert "[HIGHLIGHT 2]" in prompt
 
 
 def test_process_readwise_document_generates_cards(multi_highlight_md):
@@ -269,7 +244,10 @@ def test_process_readwise_document_generates_cards(multi_highlight_md):
         llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
         cards = process_readwise_document(multi_highlight_md, llm_provider, create_prompt_manager())
 
-    assert len(cards) == 2
+    # One call, returning one card in the mocked response - a multi-highlight
+    # document no longer multiplies the call (and therefore card) count by
+    # highlight count.
+    assert len(cards) == 1
     assert all(c.strategy == "readwise_highlight" for c in cards)
 
 

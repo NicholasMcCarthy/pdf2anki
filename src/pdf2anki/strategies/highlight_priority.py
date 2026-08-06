@@ -14,7 +14,7 @@ import logging
 from typing import Any, Dict, List
 
 from ..chunking import TextChunk
-from .base import BaseStrategy, FlashcardData, infer_card_type, validate_cloze_format
+from .base import BaseStrategy, FlashcardData, default_page_citation, infer_card_type, validate_cloze_format
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +68,17 @@ class HighlightPriorityStrategy(BaseStrategy):
         """Parse LLM response into highlight-grounded flashcard data objects."""
         cards = []
 
-        # All highlight screenshots captured on this page-level chunk are attached to
-        # every card generated from it. The LLM isn't asked to map individual cards to
-        # individual highlights, so this is page-granularity association, not a
-        # precise per-highlight one.
+        # All highlight screenshots captured on this chunk are attached to every
+        # card generated from it. The LLM isn't asked to map individual cards to
+        # individual highlights, so this is chunk-granularity association, not a
+        # precise per-highlight one - and since a chunk can now span an entire
+        # short paper (see chunking.py:_chunk_by_highlights), that granularity can
+        # be coarse (e.g. a 10-highlight paper's every card carries all 10
+        # screenshots). Accepted as a known limitation: a substring-match
+        # heuristic (attach only the highlight whose text overlaps a given card)
+        # would be fragile against paraphrased cards and risks silently dropping
+        # a legitimate screenshot, which is worse than Anki storing a few unused
+        # media references.
         screenshots = [
             h["screenshot"] for h in (chunk.highlights or []) if h.get("screenshot")
         ]
@@ -80,7 +87,7 @@ class HighlightPriorityStrategy(BaseStrategy):
             try:
                 card_type = infer_card_type(card_data)
                 common = dict(
-                    page_citation=card_data.get("page_citation", f"p. {chunk.start_page}"),
+                    page_citation=card_data.get("page_citation", default_page_citation(chunk)),
                     core_concept=card_data.get("core_concept", "Highlighted Content"),
                     difficulty=card_data.get("difficulty", "medium"),
                     tags=self._process_tags(card_data.get("tags", [])),

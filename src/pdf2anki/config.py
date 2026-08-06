@@ -153,7 +153,7 @@ class Inputs:
 
 @dataclass
 class Chunking:
-    mode: str = "smart"                 # pages|sections|paragraphs|smart|figures|highlights|entire
+    mode: str = "smart"                 # pages|sections|paragraphs|smart|figures|highlights|entire|outline
     tokens_per_chunk: int = 2000
     overlap_tokens: int = 200
     respect_page_bounds: bool = True
@@ -161,6 +161,7 @@ class Chunking:
     max_chunk_tokens: int = 4000
     enable_trimming: bool = True        # entire-mode helpers
     token_budget: int = 8000
+    single_call_max_pages: int = 12     # highlights-mode: papers this short or shorter go in one LLM call, not chunked
 
 
 @dataclass
