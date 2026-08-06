@@ -5,7 +5,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from pdf2anki.config import LLMConfig
-from pdf2anki.llm import LLMProvider, ModelRegistry, _extract_text_content, _rejects_temperature
+from pdf2anki.llm import (
+    LLMProvider,
+    ModelRegistry,
+    _extract_text_content,
+    _rejects_temperature,
+    _strip_markdown_json_fence,
+)
 
 
 def _make_config(provider: str, model: str = "gpt-4-1106-preview") -> LLMConfig:
@@ -133,23 +139,64 @@ def test_generate_handles_list_content_from_structured_response(tmp_path, monkey
     assert response.content == '{"cards": [{"front": "Q", "back": "A"}]}'
 
 
-def test_generate_logs_diagnostics_for_empty_string_content(tmp_path, monkeypatch, caplog):
-    """Reproduces a real failure that the list-content fix doesn't cover:
-    response.content itself is a plain empty string (not a list with no text
-    blocks), so _extract_text_content's own diagnostic never fires. generate()
-    must log the full response (content, response_metadata, usage_metadata)
-    so an empty-response failure is diagnosable without raw HTTP debug logs."""
+def test_strip_markdown_json_fence_removes_json_tagged_fence():
+    text = '```json\n{"cards": []}\n```'
+    assert _strip_markdown_json_fence(text) == '{"cards": []}'
+
+
+def test_strip_markdown_json_fence_removes_bare_fence():
+    text = '```\n{"cards": []}\n```'
+    assert _strip_markdown_json_fence(text) == '{"cards": []}'
+
+
+def test_strip_markdown_json_fence_tolerates_surrounding_whitespace():
+    text = '  \n```json\n{"cards": []}\n```\n  '
+    assert _strip_markdown_json_fence(text) == '{"cards": []}'
+
+
+def test_strip_markdown_json_fence_passes_through_unfenced_text():
+    text = '{"cards": []}'
+    assert _strip_markdown_json_fence(text) == text
+
+
+def test_generate_strips_markdown_fence_before_and_after_parsing(tmp_path, monkeypatch):
+    """Reproduces the actual root cause found in the field: response.content
+    was non-empty (so the empty-content diagnostic never fired) but wrapped in
+    a ```json ... ``` fence, which json.loads() can't parse - it fails at
+    position 0 ("Expecting value: line 1 column 1"), identical-looking to a
+    genuinely empty response unless the raw text is inspected."""
     monkeypatch.chdir(tmp_path)
 
-    empty_response = Mock(
-        content="",
-        response_metadata={"stop_reason": "max_tokens", "usage": {"output_tokens": 8192}},
-        usage_metadata={"output_tokens": 8192},
+    fenced_response = Mock(content='```json\n{"cards": [{"front": "Q", "back": "A"}]}\n```')
+
+    with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls:
+        client = Mock()
+        client.invoke.return_value = fenced_response
+        mock_chat_anthropic_cls.return_value = client
+
+        provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
+        response = provider.generate(prompt="test", json_mode=True, max_retries=0)
+
+    assert response.content == '{"cards": [{"front": "Q", "back": "A"}]}'
+
+
+def test_generate_logs_raw_content_on_any_json_parse_failure(tmp_path, monkeypatch, caplog):
+    """The diagnostic now fires on ANY JSON parse failure (not just an empty-
+    content special case), since an "Expecting value" error looks identical
+    whether the content was empty, whitespace, or - as seen in practice - a
+    fence-stripping edge case the regex didn't catch. Includes the raw text
+    and response_metadata (stop_reason is the key field for a truncation
+    theory) so the next occurrence doesn't need another guess-and-check round."""
+    monkeypatch.chdir(tmp_path)
+
+    bad_response = Mock(
+        content="not json at all",
+        response_metadata={"stop_reason": "end_turn"},
     )
 
     with patch("pdf2anki.llm.ChatAnthropic") as mock_chat_anthropic_cls:
         client = Mock()
-        client.invoke.return_value = empty_response
+        client.invoke.return_value = bad_response
         mock_chat_anthropic_cls.return_value = client
 
         provider = LLMProvider(_make_config("anthropic", model="claude-sonnet-5"))
@@ -157,10 +204,10 @@ def test_generate_logs_diagnostics_for_empty_string_content(tmp_path, monkeypatc
             with pytest.raises(ValueError, match="Failed to get valid JSON"):
                 provider.generate(prompt="test", json_mode=True, max_retries=0)
 
-    diagnostic_logs = [r.message for r in caplog.records if "empty response body" in r.message]
+    diagnostic_logs = [r.message for r in caplog.records if "Invalid JSON response" in r.message]
     assert len(diagnostic_logs) == 1
-    assert "max_tokens" in diagnostic_logs[0]
-    assert "stop_reason" in diagnostic_logs[0]
+    assert "not json at all" in diagnostic_logs[0]
+    assert "end_turn" in diagnostic_logs[0]
 
 
 def test_rejects_temperature_detects_anthropic_error_message():

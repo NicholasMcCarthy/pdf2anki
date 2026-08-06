@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -69,6 +70,24 @@ def _extract_text_content(content: Any) -> str:
             )
         return result
     return str(content)
+
+
+_MARKDOWN_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    """Strip a wrapping ```json ... ``` (or bare ``` ... ```) markdown code
+    fence from an LLM's JSON response, if present.
+
+    Despite every prompt asking for raw JSON, some models format their answer
+    as a fenced code block anyway. json.loads() can't parse the fence
+    markers - it fails at position 0 ("Expecting value: line 1 column 1
+    (char 0)") regardless of whether the JSON inside the fence is otherwise
+    perfectly well-formed, which looks identical to a genuinely empty
+    response unless you inspect the raw text.
+    """
+    match = _MARKDOWN_JSON_FENCE_RE.match(text)
+    return match.group(1).strip() if match else text
 
 
 def _rejects_temperature(error: Exception) -> bool:
@@ -197,31 +216,32 @@ class LLMProvider:
                 # a list of content blocks instead - normalize before any string use.
                 response_text = _extract_text_content(response.content)
 
-                if not response_text.strip():
-                    # Empty response text with no diagnostic already logged by
-                    # _extract_text_content (that only fires for a non-empty list
-                    # with no text blocks) - most likely response.content was
-                    # already an empty string. Log everything the AIMessage
-                    # carries about *why* - stop_reason/usage in response_metadata
-                    # is the key signal (e.g. "max_tokens" = truncated before any
-                    # output, vs "end_turn" = the model deliberately said nothing).
-                    logger.warning(
-                        f"LLM returned an empty response body on a successful call. "
-                        f"content={response.content!r} "
-                        f"response_metadata={getattr(response, 'response_metadata', None)!r} "
-                        f"usage_metadata={getattr(response, 'usage_metadata', None)!r}"
-                    )
-
-                # Validate JSON if requested
+                # Validate JSON if requested. Some models wrap their JSON answer in a
+                # ```json ... ``` fence despite being asked for raw JSON - strip that
+                # before parsing (and return the stripped version) rather than fail on
+                # the fence markers alone.
                 if json_mode:
+                    parsed_text = _strip_markdown_json_fence(response_text)
                     try:
-                        json.loads(response_text)
+                        json.loads(parsed_text)
                     except json.JSONDecodeError as e:
+                        # Log the actual raw text on every parse failure, not just an
+                        # empty-response special case - a "Expecting value: line 1
+                        # column 1" error looks identical whether the content was
+                        # genuinely empty, whitespace, or (as seen in practice) wrapped
+                        # in a markdown fence that didn't match the stripping pattern.
+                        # response_metadata carries stop_reason (e.g. "max_tokens" vs
+                        # "end_turn"), useful if this turns out to be a truncation issue.
+                        logger.warning(
+                            f"Invalid JSON response, retrying (attempt {attempt + 1}): {e}. "
+                            f"raw content (first 500 chars): {response_text[:500]!r} "
+                            f"response_metadata={getattr(response, 'response_metadata', None)!r}"
+                        )
                         if attempt < max_retries:
-                            logger.warning(f"Invalid JSON response, retrying (attempt {attempt + 1}): {e}")
                             continue
                         else:
                             raise ValueError(f"Failed to get valid JSON after {max_retries} retries: {e}")
+                    response_text = parsed_text
 
                 response_time = time.time() - start_time
 
