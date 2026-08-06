@@ -10,6 +10,18 @@ import pandas as pd
 
 from .config import Anki, Config # AnkiConfig, Config, DeckStructure
 from .io import load_csv
+from .note_types import (
+    BASIC_AFMT,
+    BASIC_CSS,
+    BASIC_FIELDS,
+    BASIC_MODEL_NAME,
+    BASIC_QFMT,
+    CLOZE_AFMT,
+    CLOZE_CSS,
+    CLOZE_FIELDS,
+    CLOZE_MODEL_NAME,
+    CLOZE_QFMT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,187 +57,36 @@ class AnkiDeckBuilder:
     def _create_default_note_types(self) -> None:
         """Create default Anki note types."""
         
-        # Basic note type
+        # Basic note type - field/template/css definitions live in note_types.py,
+        # shared with the live AnkiConnect push path (service/ankiconnect.py)
+        # so a note pushed live has the exact same shape as one in the .apkg.
         basic_note_type = genanki.Model(
             model_id=_stable_id("pdf2anki-basic-note-type-v1"),
-            name='PDF2Anki Basic',
-            fields=[
-                {'name': 'Front'},
-                {'name': 'Back'},
-                {'name': 'Source'},
-                {'name': 'Page'},
-                {'name': 'Section'},
-                {'name': 'Tags'},
-                {'name': 'Extra'},
-            ],
+            name=BASIC_MODEL_NAME,
+            fields=[{'name': f} for f in BASIC_FIELDS],
             templates=[
                 {
                     'name': 'Card 1',
-                    'qfmt': '''
-                        <div class="question">{{Front}}</div>
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
-                    'afmt': '''
-                        <div class="question">{{Front}}</div>
-                        <hr>
-                        <div class="answer">{{Back}}</div>
-                        {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
+                    'qfmt': BASIC_QFMT,
+                    'afmt': BASIC_AFMT,
                 },
             ],
-            css='''
-                .card {
-                    font-family: Arial, sans-serif;
-                    font-size: 16px;
-                    text-align: left;
-                    color: #333;
-                    background-color: #fff;
-                    padding: 20px;
-                }
-                
-                .question {
-                    font-size: 18px;
-                    font-weight: bold;
-                    margin-bottom: 15px;
-                    color: #2c3e50;
-                }
-                
-                .answer {
-                    font-size: 16px;
-                    line-height: 1.5;
-                    margin-bottom: 15px;
-                }
-                
-                .extra {
-                    font-size: 14px;
-                    color: #666;
-                    font-style: italic;
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background-color: #f8f9fa;
-                    border-left: 3px solid #007bff;
-                }
-                
-                .source {
-                    font-size: 12px;
-                    color: #888;
-                    margin-top: 15px;
-                    padding-top: 10px;
-                    border-top: 1px solid #eee;
-                }
-                
-                .section {
-                    font-size: 12px;
-                    color: #666;
-                    font-style: italic;
-                }
-                
-                /* MathJax support */
-                .MathJax {
-                    font-size: 1.1em !important;
-                }
-                
-                /* Code styling */
-                code {
-                    background-color: #f4f4f4;
-                    padding: 2px 4px;
-                    border-radius: 3px;
-                    font-family: monospace;
-                }
-                
-                pre {
-                    background-color: #f4f4f4;
-                    padding: 10px;
-                    border-radius: 5px;
-                    overflow-x: auto;
-                }
-            '''
+            css=BASIC_CSS,
         )
         
         # Cloze note type
         cloze_note_type = genanki.Model(
             model_id=_stable_id("pdf2anki-cloze-note-type-v1"),
-            name='PDF2Anki Cloze',
-            fields=[
-                {'name': 'Text'},
-                {'name': 'Extra'},
-                {'name': 'Source'},
-                {'name': 'Page'},
-                {'name': 'Section'},
-                {'name': 'Tags'},
-            ],
+            name=CLOZE_MODEL_NAME,
+            fields=[{'name': f} for f in CLOZE_FIELDS],
             templates=[
                 {
                     'name': 'Cloze',
-                    'qfmt': '''
-                        <div class="cloze-question">{{cloze:Text}}</div>
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
-                    'afmt': '''
-                        <div class="cloze-answer">{{cloze:Text}}</div>
-                        {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
+                    'qfmt': CLOZE_QFMT,
+                    'afmt': CLOZE_AFMT,
                 },
             ],
-            css='''
-                .card {
-                    font-family: Arial, sans-serif;
-                    font-size: 16px;
-                    text-align: left;
-                    color: #333;
-                    background-color: #fff;
-                    padding: 20px;
-                }
-                
-                .cloze-question, .cloze-answer {
-                    font-size: 16px;
-                    line-height: 1.6;
-                    margin-bottom: 15px;
-                }
-                
-                .cloze {
-                    background-color: #007bff;
-                    color: white;
-                    padding: 2px 6px;
-                    border-radius: 3px;
-                    font-weight: bold;
-                }
-                
-                .extra {
-                    font-size: 14px;
-                    color: #666;
-                    font-style: italic;
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background-color: #f8f9fa;
-                    border-left: 3px solid #28a745;
-                }
-                
-                .source {
-                    font-size: 12px;
-                    color: #888;
-                    margin-top: 15px;
-                    padding-top: 10px;
-                    border-top: 1px solid #eee;
-                }
-                
-                .section {
-                    font-size: 12px;
-                    color: #666;
-                    font-style: italic;
-                }
-                
-                /* MathJax support */
-                .MathJax {
-                    font-size: 1.1em !important;
-                }
-            ''',
+            css=CLOZE_CSS,
             model_type=genanki.Model.CLOZE
         )
         

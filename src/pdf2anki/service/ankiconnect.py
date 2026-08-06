@@ -12,6 +12,19 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from ..note_types import (
+    BASIC_AFMT,
+    BASIC_CSS,
+    BASIC_FIELDS,
+    BASIC_MODEL_NAME,
+    BASIC_QFMT,
+    CLOZE_AFMT,
+    CLOZE_CSS,
+    CLOZE_FIELDS,
+    CLOZE_MODEL_NAME,
+    CLOZE_QFMT,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +63,26 @@ class AnkiConnectClient:
 
     def create_deck(self, deck_name: str) -> None:
         self.invoke("createDeck", deck=deck_name)
+
+    def model_names(self) -> List[str]:
+        return self.invoke("modelNames") or []
+
+    def create_model(
+        self,
+        model_name: str,
+        in_order_fields: List[str],
+        css: str,
+        card_templates: List[Dict[str, str]],
+        is_cloze: bool = False,
+    ) -> None:
+        self.invoke(
+            "createModel",
+            modelName=model_name,
+            inOrderFields=in_order_fields,
+            css=css,
+            isCloze=is_cloze,
+            cardTemplates=card_templates,
+        )
 
     def add_notes(self, notes: List[Dict[str, Any]]) -> List[Optional[int]]:
         """Add notes, in AnkiConnect's own note-object shape. AnkiConnect
@@ -93,7 +126,7 @@ def card_row_to_note(row: Dict[str, Any], deck_name: str) -> Dict[str, Any]:
             "Page": str(page),
             "Section": str(section),
         }
-        model_name = "PDF2Anki Cloze"
+        model_name = CLOZE_MODEL_NAME
     else:
         fields = {
             "Front": str(row.get("front", "")),
@@ -103,7 +136,7 @@ def card_row_to_note(row: Dict[str, Any], deck_name: str) -> Dict[str, Any]:
             "Section": str(section),
             "Extra": str(extra),
         }
-        model_name = "PDF2Anki Basic"
+        model_name = BASIC_MODEL_NAME
 
     return {
         "deckName": deck_name,
@@ -111,6 +144,54 @@ def card_row_to_note(row: Dict[str, Any], deck_name: str) -> Dict[str, Any]:
         "fields": fields,
         "tags": tags,
     }
+
+
+def ensure_note_types(client: AnkiConnectClient) -> None:
+    """Create the PDF2Anki Basic/Cloze note types in the live Anki collection
+    if they aren't already there.
+
+    A collection normally gets these note types as a side effect of
+    importing a PDF2Anki .apkg (genanki embeds the model definition in the
+    package). A collection that has only ever received notes via the live
+    AnkiConnect push - never imported an .apkg - never gets that
+    model-creation step, so addNotes fails outright with "model was not
+    found: PDF2Anki Cloze"/"PDF2Anki Basic" for every note. Idempotent and
+    best-effort: if the model-listing call itself fails (e.g. AnkiConnect
+    unreachable), this just logs and returns, leaving add_notes to fail with
+    its own clear error rather than raising here.
+    """
+    try:
+        existing = set(client.model_names())
+    except Exception as e:
+        logger.warning(f"Could not list existing Anki note types: {e}")
+        return
+
+    if BASIC_MODEL_NAME not in existing:
+        _create_note_type(
+            client, BASIC_MODEL_NAME, BASIC_FIELDS,
+            [{"Name": "Card 1", "Front": BASIC_QFMT, "Back": BASIC_AFMT}], BASIC_CSS,
+        )
+    if CLOZE_MODEL_NAME not in existing:
+        _create_note_type(
+            client, CLOZE_MODEL_NAME, CLOZE_FIELDS,
+            [{"Name": "Cloze", "Front": CLOZE_QFMT, "Back": CLOZE_AFMT}], CLOZE_CSS,
+            is_cloze=True,
+        )
+
+
+def _create_note_type(
+    client: AnkiConnectClient,
+    model_name: str,
+    fields: List[str],
+    card_templates: List[Dict[str, str]],
+    css: str,
+    is_cloze: bool = False,
+) -> None:
+    try:
+        client.create_model(model_name, fields, css, card_templates, is_cloze=is_cloze)
+        logger.info(f"Created Anki note type '{model_name}' via AnkiConnect")
+    except Exception as e:
+        logger.warning(f"Failed to create Anki note type '{model_name}' via AnkiConnect: {e}")
 
 
 def push_notes(
@@ -131,6 +212,7 @@ def push_notes(
 
     try:
         client.create_deck(deck_name)
+        ensure_note_types(client)
         notes = [card_row_to_note(row, deck_name) for row in rows]
         added_ids = client.add_notes(notes)
         result["added"] = sum(1 for i in added_ids if i is not None)
