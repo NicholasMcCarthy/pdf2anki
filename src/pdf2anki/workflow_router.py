@@ -44,6 +44,35 @@ _DOCUMENT_TYPE_TO_WORKFLOW = {
 
 MARKDOWN_SUFFIXES = (".md", ".markdown")
 
+# Subdeck label per workflow (joined onto Anki.deck_name with "::" - Anki
+# and genanki's own subdeck separator) for the "workflow" deck_structure
+# mode - see build.py::AnkiDeckBuilder._create_decks(). GENERIC has no
+# label: an unclassified document's cards stay in the base deck rather than
+# a "Generic" subdeck nobody asked for.
+_WORKFLOW_DECK_LABELS = {
+    Workflow.READWISE: "Readwise",
+    Workflow.ACADEMIC_PAPER: "Articles",
+    Workflow.TEXTBOOK: "Textbooks",
+    Workflow.GENERIC: None,
+}
+
+
+def deck_subdeck_for_workflow(workflow: "Workflow", book_name: Optional[str] = None) -> Optional[str]:
+    """Subdeck path segment (relative to the base deck_name, not yet joined
+    onto it) for a workflow, e.g. "Readwise", "Articles", or
+    "Textbooks::My Book" - or None for GENERIC/unclassified documents,
+    which stay in the base deck with no subdeck at all.
+
+    `book_name` only affects TEXTBOOK - each book gets its own subdeck
+    nested under "Textbooks" rather than sharing one flat textbook subdeck.
+    """
+    label = _WORKFLOW_DECK_LABELS.get(workflow)
+    if label is None:
+        return None
+    if workflow == Workflow.TEXTBOOK and book_name:
+        return f"{label}::{book_name}"
+    return label
+
 
 def select_workflow(
     path: Path,

@@ -555,13 +555,18 @@ class TextChunker:
 
         return result
 
-    def _build_highlight_markers(self, annotations: List[Dict]) -> List[str]:
-        """Render [HIGHLIGHT]/[NOTE] marker blocks for a list of annotation
-        records, in the shared format both the single-call and per-chunk
-        highlight paths use."""
+    def _build_highlight_markers(self, annotations: List[Dict], start_index: int = 1) -> List[str]:
+        """Render numbered [HIGHLIGHT N]/[NOTE] marker blocks for a list of
+        annotation records, in the shared format both the single-call and
+        per-chunk highlight paths use. Numbering starts at `start_index` and
+        follows `annotations`' order - callers must keep that order
+        consistent with `chunk.highlights` so a strategy's LLM response can
+        reference "highlight N" (e.g. to pick that highlight's screenshot
+        for a specific card - see strategies/highlight_priority.py) and have
+        it map unambiguously back to `chunk.highlights[N - 1]`."""
         blocks = []
-        for ann in annotations:
-            marker = "[HIGHLIGHT"
+        for i, ann in enumerate(annotations, start=start_index):
+            marker = f"[HIGHLIGHT {i}"
             if ann.get("author"):
                 marker += f" - {ann['author']}"
             marker += f"]: {ann['text']}"
@@ -576,15 +581,20 @@ class TextChunker:
         highlight. Highlight markers are inserted inline at each page's
         position (not extracted into a separate block) so a reader-highlighted
         passage still appears exactly where it occurs in the paper's flow."""
-        by_page: Dict[int, List[Dict]] = defaultdict(list)
-        for ann in annotations:
-            by_page[ann["page_num"]].append(ann)
+        # Global 1-based index matching `annotations`' order (== the order
+        # chunk.highlights ends up in below) - kept even though markers get
+        # interleaved page-by-page, so "[HIGHLIGHT N]" numbering in the
+        # rendered text is unambiguous regardless of which page N appears on.
+        numbered = list(enumerate(annotations, start=1))
+        by_page: Dict[int, List[tuple]] = defaultdict(list)
+        for i, ann in numbered:
+            by_page[ann["page_num"]].append((i, ann))
 
         parts = []
         for page in pages:
             page_num = page.get("page_num")
-            page_annotations = by_page.get(page_num, [])
-            parts.extend(self._build_highlight_markers(page_annotations))
+            for i, ann in by_page.get(page_num, []):
+                parts.extend(self._build_highlight_markers([ann], start_index=i))
 
             page_text = (page.get("raw_text") or "").strip()
             if page_text:

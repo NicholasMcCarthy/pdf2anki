@@ -8,7 +8,7 @@ import logging
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..build import build_anki_deck
 from ..chunking import TextChunker
@@ -36,15 +36,23 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TEXTBOOK_PROFILE_PATH = Path(__file__).resolve().parents[3] / "examples" / "textbook_default.yml"
 
 
-def _effective_config_for_pdf(path: Path, config: Config, workflow: Workflow) -> Config:
+def _effective_config_for_pdf(path: Path, config: Config, workflow: Workflow) -> tuple[Config, Optional[str]]:
     """Build a one-off effective config for a single PDF, applying the same
     heuristic chunking/strategy defaults `scan-docs` would - without needing a
     persistent documents.yaml scan of a whole directory first, since the
     service discovers files one at a time as they arrive.
+
+    Returns `(effective_config, book_name)` - `book_name` is only meaningful
+    for TEXTBOOK (a per-book instructions.yml's `deck_name`, if set) and is
+    the label process_single_pdf nests this book's cards under
+    ("<deck_name>::Textbooks::<book_name>") for the default "workflow"
+    deck_structure - see workflow_router.deck_subdeck_for_workflow(). Falls
+    back to the book's own directory name (process_single_pdf's default)
+    when instructions.yml doesn't set one.
     """
     doc_type = WORKFLOW_TO_DOCUMENT_TYPE.get(workflow, DocumentType.UNKNOWN)
     if doc_type == DocumentType.UNKNOWN:
-        return config
+        return config, None
 
     analyzer = DocumentAnalyzer()
     metadata = analyzer.analyze_document(str(path))
@@ -67,6 +75,7 @@ def _effective_config_for_pdf(path: Path, config: Config, workflow: Workflow) ->
         for name in ("key_points", "cloze_definitions", "figure_based", "highlight_priority"):
             getattr(effective.generate.strategies, name).enabled = name in suggested
 
+    book_name = None
     if workflow == Workflow.TEXTBOOK:
         # Per-book instructions.yml (hand-placed next to the PDF in the mounted
         # textbooks/ directory) takes full precedence over the generic
@@ -78,14 +87,13 @@ def _effective_config_for_pdf(path: Path, config: Config, workflow: Workflow) ->
         effective.pipeline.ingestion.chunking = profile.chunking
         for name in ("key_points", "cloze_definitions", "figure_based", "highlight_priority"):
             getattr(effective.generate.strategies, name).enabled = name in profile.strategies
-        if profile.deck_name:
-            effective.generate.anki.deck_name = profile.deck_name
+        book_name = profile.deck_name
         if profile.extra_tags:
             effective.generate.tags.default_tags = list(
                 dict.fromkeys(effective.generate.tags.default_tags + profile.extra_tags)
             )
 
-    return effective
+    return effective, book_name
 
 
 def process_new_file(path: Path, config: Config) -> Dict[str, Any]:
@@ -105,14 +113,11 @@ def process_new_file(path: Path, config: Config) -> Dict[str, Any]:
     llm_provider = create_llm_provider(config.llm)
     id_manager = create_id_manager(config.ids)
 
-    deck_name = config.anki.deck_name  # may be overridden below by a per-book profile
-
     if workflow == Workflow.READWISE:
-        cards = process_readwise_document(path, llm_provider, prompt_manager)
+        cards = process_readwise_document(path, llm_provider, prompt_manager, deck_name=config.anki.deck_name)
         images = []
     else:
-        effective_config = _effective_config_for_pdf(path, config, workflow)
-        deck_name = effective_config.anki.deck_name
+        effective_config, book_name = _effective_config_for_pdf(path, config, workflow)
         dedup_manager = create_deduplication_manager(effective_config.deduplication)
         rag_manager = create_rag_manager(effective_config.rag)
         telemetry = create_telemetry_collector(effective_config.telemetry)
@@ -128,6 +133,7 @@ def process_new_file(path: Path, config: Config) -> Dict[str, Any]:
             dedup_manager=dedup_manager,
             rag_manager=rag_manager,
             telemetry=telemetry,
+            book_name=book_name,
         )
 
     saved_images = save_images(images, config.output.media_path) if images else []
@@ -139,7 +145,11 @@ def process_new_file(path: Path, config: Config) -> Dict[str, Any]:
         card_dict["id"] = id_manager.generate_id(card)
         card_dict["created_at"] = now
         card_dict["updated_at"] = now
-        card_dict["deck"] = deck_name
+        # generate_cards() already set this per-card from the document's
+        # workflow classification (see process_single_pdf/
+        # process_readwise_document) - config.anki.deck_name is only a
+        # fallback for cards that somehow didn't get one set.
+        card_dict["deck"] = card_dict.get("deck") or config.anki.deck_name
         card_dict.setdefault("longtext", "")
         card_dict.setdefault("my_notes", "")
         new_rows.append(card_dict)
@@ -180,9 +190,19 @@ def _push_to_ankiconnect(config: Config, new_rows: list) -> Dict[str, Any]:
         logger.warning(f"AnkiConnect enabled but not reachable at {config.service.ankiconnect.url}")
         return {"attempted": len(new_rows), "added": 0, "failed": len(new_rows), "synced": False}
 
+    # push_notes() applies one deck to the whole batch - fine here since
+    # process_new_file() handles exactly one file per call, and one file has
+    # exactly one resolved workflow deck (every row's own "deck" - see
+    # generate_cards() - agrees). Previously this used config.anki.deck_name
+    # directly, which silently ignored per-book/per-workflow deck overrides
+    # for the live push (they only ever reached the CSV) - reading it off
+    # the rows themselves fixes that.
+    deck_name = new_rows[0].get("deck") or config.anki.deck_name if new_rows else config.anki.deck_name
+
     return push_notes(
         client,
-        deck_name=config.anki.deck_name,
+        deck_name=deck_name,
         rows=new_rows,
         sync_after=config.service.ankiconnect.sync_after_update,
+        media_path=config.output.media_path,
     )

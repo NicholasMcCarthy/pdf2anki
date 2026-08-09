@@ -13,7 +13,7 @@ Use the abstract to understand the paper's domain, research question, contributi
 
 **Annotated text**:
 
-- `[HIGHLIGHT]` marks text deliberately selected by the reader.
+- `[HIGHLIGHT N]` marks text deliberately selected by the reader, numbered for reference (see "Images" below).
 - `[NOTE]` marks the reader's own annotation or assessment.
 - Surrounding page text is included only for disambiguation - either inline per page (`[PAGE N]:`) when the whole paper is supplied as one chunk, or as a single `[PAGE CONTEXT]:` block when this chunk was drawn from a longer paper and may itself span more than one page.
 
@@ -120,6 +120,8 @@ When a finding is specific to this paper, signal that explicitly with wording su
 
 ## Card granularity
 
+Every card must be atomic: one question, one answer, testing exactly one fact, concept, or relationship. Never bundle multiple unrelated questions, a checklist of items, or several distinct claims into a single front/back or cloze.
+
 Prefer one meaningful learning objective per card, but do not over-atomise connected scientific ideas.
 
 For general principles and definitions, relatively atomic cards are appropriate.
@@ -179,13 +181,21 @@ Do not put the reference in the question or cloze text unless identifying the pa
 
 Also retain the structured `page_citation` field for indexing - use {% if page_end and page_end != page_start %}"pp. {{ page_start }}-{{ page_end }}" if the card's source isn't clearly on one page, otherwise the specific page it came from{% else %}"p. {{ page_start }}"{% endif %}.
 
+## Images
+
+Some highlights have an associated screenshot of that region of the page (a diagram, chart, table, or other visual content the reader highlighted alongside text). You cannot see these images, but you can request one be attached to a card: set `"highlight_index"` to the number of the `[HIGHLIGHT N]` this card is grounded in, and if that highlight has an image it will be attached automatically. Leave `highlight_index` unset for a card not grounded in one specific numbered highlight, or when no image would help.
+
+Set `"image_on_front"` to `true` only when the image is essential to understanding the question itself - e.g. the card asks the reader to interpret, identify, or reason about the diagram or figure directly. Leave it `false` (or unset) when the image is merely useful supporting context: it is still shown to the reader after they answer, alongside the source citation, regardless of this setting.
+
+Do not reference a specific section number, figure number, or diagram (e.g. "Section 6.5.3", "Figure 4", "the workflow diagram above") as though the reader can see it, unless you are also attaching that item's image via `highlight_index` with `image_on_front: true`. A card that asks the reader to reason about a diagram they cannot see is not answerable - rephrase around the underlying concept instead, or skip it.
+
 ## Output format
 
 Return valid JSON only. Do not include Markdown fences, commentary, or text outside the JSON.
 
 Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. Include only the fields appropriate to the selected card type.
 
-`annotation_category` should identify the principal category that justified creating the card.
+`annotation_category` should identify the principal category that justified creating the card. `highlight_index`/`image_on_front` are optional - see "Images" above.
 
 {
   "content_assessment": {
@@ -202,6 +212,8 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
       "back": "{{ basic_fields.get('back', {}).get('llm_instructions', 'Concise but complete answer, including essential qualifications') }}. Source: Paper reference, p. X.",
       "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
+      "highlight_index": null,
+      "image_on_front": false,
       "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["domain", "topic"]
@@ -212,6 +224,8 @@ Basic cards use `front` and `back`. Cloze cards use `cloze_text` and `extra`. In
       "extra": "{{ cloze_fields.get('extra', {}).get('llm_instructions', 'Brief explanation or qualification') }}. Source: Paper reference, p. X.",
       "page_citation": "{% if page_end and page_end != page_start %}pp. {{ page_start }}-{{ page_end }}{% else %}p. {{ page_start }}{% endif %}",
       "annotation_category": "general_principle|key_concept|key_finding|methodological_insight|interesting_connection|important_resource|paper_contribution",
+      "highlight_index": null,
+      "image_on_front": false,
       "core_concept": "The main knowledge or research insight being tested",
       "difficulty": "easy|medium|hard",
       "tags": ["domain", "topic"]

@@ -346,7 +346,12 @@ class Ids:
 class Anki:
     deck_name: str = "PDF2Anki"
     deck_id: Optional[int] = None
-    deck_structure: str = "flat"     # flat|by_chapter|by_theme|predefined
+    # workflow|flat|chapter|theme - "workflow" (the default) puts cards from
+    # each workflow into their own subdeck under deck_name (e.g.
+    # "PDF2Anki::Readwise", "PDF2Anki::Textbooks::SomeBook",
+    # "PDF2Anki::Articles") - see workflow_router.deck_subdeck_for_workflow()
+    # and build.py::AnkiDeckBuilder._create_decks().
+    deck_structure: str = "workflow"
     note_types: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     preserve_latex: bool = True
 

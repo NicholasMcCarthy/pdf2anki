@@ -764,7 +764,8 @@ def generate_readwise(
             console.print(f"  📄 Processing {md_path.name}...")
             try:
                 cards = process_readwise_document(
-                    md_path, llm_provider, prompt_manager, max_cards_per_highlight=max_cards
+                    md_path, llm_provider, prompt_manager, max_cards_per_highlight=max_cards,
+                    deck_name=base_config.anki.deck_name,
                 )
                 all_cards.extend(cards)
                 console.print(f"     ✅ {len(cards)} cards generated")
@@ -785,7 +786,7 @@ def generate_readwise(
             card_dict["id"] = id_manager.generate_id(card)
             card_dict["created_at"] = now
             card_dict["updated_at"] = now
-            card_dict["deck"] = base_config.anki.deck_name
+            card_dict["deck"] = card_dict.get("deck") or base_config.anki.deck_name
             card_dict["longtext"] = ""
             card_dict["my_notes"] = ""
             new_rows.append(card_dict)
@@ -930,6 +931,7 @@ def _run_full_generation(documents: dict, base_config: Config, documents_config:
                 dedup_manager=dedup_manager,
                 rag_manager=rag_manager,
                 telemetry=telemetry,
+                workflow_override=doc_config.workflow,
             )
 
             all_cards.extend(cards)

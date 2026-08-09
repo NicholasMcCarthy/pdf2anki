@@ -92,6 +92,32 @@ def test_shipped_template_threads_real_note_type_instructions(template_name):
         assert cloze_fields["cloze_text"]["llm_instructions"] in rendered
 
 
+def test_highlight_priority_prompt_offers_highlight_index_and_image_on_front():
+    pm = create_prompt_manager()
+    rendered = pm.render_template(
+        "highlight_priority.j2", chunk="[HIGHLIGHT 1]: text", page_start=1, page_end=1, pdf_title="T",
+    )
+    assert "highlight_index" in rendered
+    assert "image_on_front" in rendered
+    assert "[HIGHLIGHT N]" in rendered
+
+
+def test_highlight_priority_prompt_warns_against_unreferenceable_sections():
+    pm = create_prompt_manager()
+    rendered = pm.render_template(
+        "highlight_priority.j2", chunk="[HIGHLIGHT 1]: text", page_start=1, page_end=1, pdf_title="T",
+    )
+    assert "Section 6.5.3" in rendered or "section number" in rendered.lower()
+
+
+def test_highlight_priority_prompt_requires_atomic_cards():
+    pm = create_prompt_manager()
+    rendered = pm.render_template(
+        "highlight_priority.j2", chunk="[HIGHLIGHT 1]: text", page_start=1, page_end=1, pdf_title="T",
+    )
+    assert "atomic" in rendered.lower()
+
+
 def test_cloze_definitions_strategy_points_at_the_renamed_template():
     from pdf2anki.strategies.cloze_definitions import ClozeDefinitionsStrategy
     from unittest.mock import Mock

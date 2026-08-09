@@ -4,7 +4,7 @@ prompts/highlight_priority.j2)."""
 
 import fitz
 
-from pdf2anki.pdf import extract_abstract_text, extract_pdf_content
+from pdf2anki.pdf import PDFDocument, extract_abstract_text, extract_pdf_content
 
 
 def _pages(*texts):
@@ -95,3 +95,49 @@ def test_extract_pdf_content_omits_abstract_key_when_not_found(tmp_path):
 
     content = extract_pdf_content(path, extract_images=False, extract_structure=False)
     assert "abstract" not in content["metadata"]
+
+
+def test_extract_pdf_content_includes_source_path_in_metadata(tmp_path):
+    """Reproduces a real bug: card.source_pdf (strategies/base.py) reads
+    pdf_metadata["path"], but extract_pdf_content() only ever put the path at
+    the top-level content["path"], never inside content["metadata"] - so
+    every academic-PDF/textbook card's source_pdf was always "", and
+    build.py's _build_source_info() rendered the literal string "Unknown"
+    on every card."""
+    path = tmp_path / "paper.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Some content.")
+    doc.save(str(path))
+    doc.close()
+
+    content = extract_pdf_content(path, extract_images=False, extract_structure=False)
+
+    assert content["metadata"]["path"] == str(path)
+
+
+def test_pdf_document_title_falls_back_to_filename_when_metadata_title_empty(tmp_path):
+    """Reproduces a real bug: PyMuPDF's metadata dict always has a "title"
+    key present (empty string, not absent, when unset), so a
+    meta.get("title", self.path.stem) default never actually fires - a PDF
+    with no title metadata got title == "", not the filename stem."""
+    path = tmp_path / "untitled_paper.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Some content.")
+    doc.set_metadata({})  # explicit empty metadata - title key present but ""
+    doc.save(str(path))
+    doc.close()
+
+    with PDFDocument(path) as pdf_doc:
+        assert pdf_doc.metadata["title"] == "untitled_paper"
+
+
+def test_pdf_document_title_uses_real_metadata_when_present(tmp_path):
+    path = tmp_path / "paper.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "Some content.")
+    doc.set_metadata({"title": "A Real Paper Title"})
+    doc.save(str(path))
+    doc.close()
+
+    with PDFDocument(path) as pdf_doc:
+        assert pdf_doc.metadata["title"] == "A Real Paper Title"

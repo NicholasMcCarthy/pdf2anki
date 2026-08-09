@@ -26,6 +26,7 @@ from .chunking import TextChunk
 from .config import Strategy as StrategyConfig
 from .strategies.base import FlashcardData
 from .strategies.readwise_highlight import ReadwiseHighlightStrategy
+from .workflow_router import Workflow, deck_subdeck_for_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -208,10 +209,15 @@ def process_readwise_document(
     prompt_manager,
     strategy_config: Optional[StrategyConfig] = None,
     max_cards_per_highlight: int = 2,
+    deck_name: str = "PDF2Anki",
 ) -> List[FlashcardData]:
     """Parse a Readwise markdown export and generate cards for ALL of its
     highlights in a single ReadwiseHighlightStrategy call, instead of one call
     per highlight - see readwise_document_to_single_chunk().
+
+    `deck_name` is the configured base deck (Anki.deck_name) - cards land in
+    its "Readwise" subdeck (see workflow_router.deck_subdeck_for_workflow())
+    under the default "workflow" deck_structure.
     """
     if strategy_config is None:
         strategy_config = StrategyConfig(
@@ -240,6 +246,7 @@ def process_readwise_document(
         "category": doc.category,
         "extra_tags": doc.tags,
         "highlight_count": len(doc.highlights),
+        "deck": f"{deck_name}::{deck_subdeck_for_workflow(Workflow.READWISE)}",
     }
 
     # `max_cards` here is deliberately the PER-highlight cap (matching the

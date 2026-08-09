@@ -170,7 +170,14 @@ def test_textbook_workflow_honors_per_book_instructions_yml(tmp_path):
 
     from pdf2anki.io import load_csv
     df = load_csv(config.output.csv_path)
-    assert (df["deck"] == "My Custom Textbook Deck").all()
+    # instructions.yml's deck_name is now the book's *subdeck label*, nested
+    # under the base deck/workflow, rather than a full deck-name replacement
+    # - see workflow_router.deck_subdeck_for_workflow() and
+    # service/runner.py::_effective_config_for_pdf(). This is also a genuine
+    # fix: the old "full replacement" behavior never actually reached
+    # build_anki_deck()'s deck grouping or the AnkiConnect push (only the
+    # CSV column), so it silently did nothing beyond the CSV either way.
+    assert (df["deck"] == f"{config.anki.deck_name}::Textbooks::My Custom Textbook Deck").all()
 
 
 @pytest.mark.integration

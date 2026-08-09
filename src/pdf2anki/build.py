@@ -21,6 +21,8 @@ from .note_types import (
     CLOZE_FIELDS,
     CLOZE_MODEL_NAME,
     CLOZE_QFMT,
+    build_image_html,
+    build_source_display,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,6 +202,28 @@ class AnkiDeckBuilder:
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
 
+        elif self.config.deck_structure == "workflow":
+            # The default. Each card already carries its own fully-resolved
+            # deck name (e.g. "PDF2Anki::Readwise", "PDF2Anki::Articles",
+            # "PDF2Anki::Textbooks::SomeBook") - see generate_cards() /
+            # workflow_router.deck_subdeck_for_workflow() - so decks are
+            # keyed by that string directly rather than re-derived here.
+            deck_names = df['deck'].dropna().unique() if 'deck' in df.columns else []
+
+            for deck_name in deck_names:
+                deck_name = str(deck_name).strip()
+                if deck_name:
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
+                    deck = genanki.Deck(deck_id, deck_name)
+                    decks[deck_name] = deck
+
+            # Default deck for any card that somehow has no resolved deck
+            # (e.g. a GENERIC/unclassified document) - the base deck itself.
+            if 'main' not in decks:
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
+                deck = genanki.Deck(deck_id, self.config.deck_name)
+                decks['main'] = deck
+
         else:  # PREDEFINED or fallback
             # Single deck with predefined structure
             deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
@@ -221,7 +245,12 @@ class AnkiDeckBuilder:
             strategy = row.get('strategy')
             if strategy and str(strategy).strip() in decks:
                 return decks[str(strategy).strip()]
-        
+
+        elif self.config.deck_structure == "workflow":
+            deck_name = row.get('deck')
+            if deck_name and str(deck_name).strip() in decks:
+                return decks[str(deck_name).strip()]
+
         # Default to main deck
         return decks.get('main', list(decks.values())[0])
     
@@ -250,22 +279,25 @@ class AnkiDeckBuilder:
     
     def _create_basic_note(self, row: pd.Series, note_type: genanki.Model) -> genanki.Note:
         """Create a basic note."""
-        
+
         # Process LaTeX math if present
         front = self._process_math_content(str(row.get('front', '')))
         back = self._process_math_content(str(row.get('back', '')))
-        
+
         # Build source information
         source_info = self._build_source_info(row)
-        
+
         # Prepare tags
         tags = self._prepare_tags(row)
-        
+
+        image_html = build_image_html(row.get('media') or [])
+
         note = genanki.Note(
             model=note_type,
             fields=[
                 front,  # Front
                 back,   # Back
+                image_html,                  # Image
                 source_info['source'],      # Source
                 source_info['page'],        # Page
                 source_info['section'],     # Section
@@ -275,27 +307,30 @@ class AnkiDeckBuilder:
             tags=tags,
             guid=str(row.get('id', ''))
         )
-        
+
         return note
-    
+
     def _create_cloze_note(self, row: pd.Series, note_type: genanki.Model) -> genanki.Note:
         """Create a cloze deletion note."""
-        
+
         # Process LaTeX math in cloze text
         cloze_text = self._process_math_content(str(row.get('cloze_text', '')))
         extra = self._process_math_content(str(row.get('extra', '')))
-        
+
         # Build source information
         source_info = self._build_source_info(row)
-        
+
         # Prepare tags
         tags = self._prepare_tags(row)
-        
+
+        image_html = build_image_html(row.get('media') or [])
+
         note = genanki.Note(
             model=note_type,
             fields=[
                 cloze_text,  # Text
                 extra,       # Extra
+                image_html,             # Image
                 source_info['source'],  # Source
                 source_info['page'],    # Page
                 source_info['section'], # Section
@@ -304,7 +339,7 @@ class AnkiDeckBuilder:
             tags=tags,
             guid=str(row.get('id', ''))
         )
-        
+
         return note
     
     def _process_math_content(self, content: str) -> str:
@@ -317,9 +352,9 @@ class AnkiDeckBuilder:
         return content
     
     def _build_source_info(self, row: pd.Series) -> Dict[str, str]:
-        """Build source information for the note."""
-        
-        source_pdf = Path(str(row.get('source_pdf', ''))).name if row.get('source_pdf') else 'Unknown'
+        """Build source information for the note - see note_types.build_source_display()."""
+
+        source_pdf = build_source_display(row.get('source_pdf', ''), row.get('source_title', ''))
         page_start = row.get('page_start', '')
         page_end = row.get('page_end', '')
         section = str(row.get('section', '')) if row.get('section') else ''

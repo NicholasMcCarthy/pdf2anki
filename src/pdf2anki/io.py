@@ -34,7 +34,7 @@ def save_csv(
         required_columns = [
             "id", "deck", "note_type", "tags", "media",
             "front", "back", "cloze_text", "extra",
-            "source_pdf", "page_start", "page_end", "section", "ref_citation",
+            "source_pdf", "source_title", "page_start", "page_end", "section", "ref_citation",
             "llm_model", "llm_version", "strategy", "template_version",
             "created_at", "updated_at", "core_concept", "longtext", 
             "original_text", "my_notes"

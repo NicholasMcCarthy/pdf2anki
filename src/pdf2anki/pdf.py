@@ -86,7 +86,11 @@ class PDFDocument:
         """Extract PDF metadata."""
         meta = self.doc.metadata
         return {
-            "title": meta.get("title", self.path.stem),
+            # PyMuPDF's metadata dict always has a "title" key present - even
+            # for a PDF with no title set, it's "" rather than absent - so a
+            # dict.get(..., default) fallback here is dead code; it must be an
+            # explicit falsy check to ever actually catch a missing title.
+            "title": meta.get("title") or self.path.stem,
             "author": meta.get("author", ""),
             "subject": meta.get("subject", ""),
             "creator": meta.get("creator", ""),
@@ -528,6 +532,13 @@ def extract_pdf_content(
         # object PDFDocument._extract_metadata() built, and other callers may
         # hold a reference to it.
         metadata = dict(pdf_doc.metadata)
+        # Without this, card.source_pdf (strategies/base.py:
+        # generate_cards()'s `pdf_metadata.get("path", "")`) is always "" for
+        # every academic-PDF/textbook card - build.py's _build_source_info()
+        # then falls back to the literal string "Unknown" for every card's
+        # Source field. readwise.py's pdf_metadata already includes "path";
+        # this was the missing equivalent on the PDF side.
+        metadata["path"] = str(pdf_path)
         abstract = extract_abstract_text(pages_data)
         if abstract:
             metadata["abstract"] = abstract

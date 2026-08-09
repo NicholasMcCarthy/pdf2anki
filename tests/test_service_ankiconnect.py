@@ -1,6 +1,8 @@
 """Tests for the AnkiConnect client, using a mocked HTTP layer - there's no
 real Anki instance available in CI/sandbox environments."""
 
+import base64
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
@@ -11,6 +13,7 @@ from pdf2anki.service.ankiconnect import (
     AnkiConnectClient,
     AnkiConnectError,
     card_row_to_note,
+    ensure_media_uploaded,
     ensure_note_types,
     push_notes,
 )
@@ -85,6 +88,7 @@ def test_card_row_to_note_basic():
         "section": "Intro",
         "extra": "extra info",
         "tags": "bio;cells",
+        "media": ["highlight_p5_0_abc.png"],
     }
     note = card_row_to_note(row, deck_name="My Deck")
 
@@ -93,7 +97,14 @@ def test_card_row_to_note_basic():
     assert note["fields"]["Front"] == "Q?"
     assert note["fields"]["Back"] == "A."
     assert note["fields"]["Page"] == "p. 5"
+    assert note["fields"]["Image"] == '<img src="highlight_p5_0_abc.png">'
     assert note["tags"] == ["bio", "cells"]
+
+
+def test_card_row_to_note_basic_empty_image_field_without_media():
+    row = {"note_type": "Basic", "front": "Q?", "back": "A.", "tags": []}
+    note = card_row_to_note(row, deck_name="My Deck")
+    assert note["fields"]["Image"] == ""
 
 
 def test_card_row_to_note_cloze():
@@ -212,3 +223,64 @@ def test_push_notes_ensures_note_types_before_adding():
 
     assert client.create_model.call_count == 2
     assert result["added"] == 1
+
+
+def test_store_media_file_base64_encodes_and_invokes_storeMediaFile():
+    client = AnkiConnectClient()
+    with patch("pdf2anki.service.ankiconnect.requests.post") as mock_post:
+        mock_post.return_value = _mock_response({"result": "a.png", "error": None})
+        client.store_media_file("a.png", b"\x89PNG\r\n")
+
+    sent_params = mock_post.call_args.kwargs["json"]["params"]
+    assert sent_params["filename"] == "a.png"
+    assert base64.b64decode(sent_params["data"]) == b"\x89PNG\r\n"
+
+
+def test_ensure_media_uploaded_uploads_each_unique_file(tmp_path):
+    (tmp_path / "a.png").write_bytes(b"aaa")
+    (tmp_path / "b.png").write_bytes(b"bbb")
+
+    client = Mock()
+    rows = [
+        {"media": ["a.png"]},
+        {"media": ["a.png", "b.png"]},  # "a.png" repeated - should upload once
+        {"media": []},
+    ]
+    ensure_media_uploaded(client, rows, tmp_path)
+
+    assert client.store_media_file.call_count == 2
+    uploaded_names = {call.args[0] for call in client.store_media_file.call_args_list}
+    assert uploaded_names == {"a.png", "b.png"}
+
+
+def test_ensure_media_uploaded_skips_missing_file_without_raising(tmp_path):
+    client = Mock()
+    rows = [{"media": ["does_not_exist.png"]}]
+
+    ensure_media_uploaded(client, rows, tmp_path)  # must not raise
+
+    client.store_media_file.assert_not_called()
+
+
+def test_push_notes_uploads_media_when_media_path_given(tmp_path):
+    client = Mock()
+    client.model_names.return_value = ["PDF2Anki Basic", "PDF2Anki Cloze"]
+    client.add_notes.return_value = [111]
+
+    (tmp_path / "a.png").write_bytes(b"aaa")
+
+    rows = [{"note_type": "Basic", "front": "Q", "back": "A", "tags": [], "media": ["a.png"]}]
+    push_notes(client, deck_name="Deck", rows=rows, sync_after=False, media_path=tmp_path)
+
+    client.store_media_file.assert_called_once_with("a.png", b"aaa")
+
+
+def test_push_notes_skips_media_upload_when_media_path_omitted():
+    client = Mock()
+    client.model_names.return_value = ["PDF2Anki Basic", "PDF2Anki Cloze"]
+    client.add_notes.return_value = [111]
+
+    rows = [{"note_type": "Basic", "front": "Q", "back": "A", "tags": [], "media": ["a.png"]}]
+    push_notes(client, deck_name="Deck", rows=rows, sync_after=False)
+
+    client.store_media_file.assert_not_called()

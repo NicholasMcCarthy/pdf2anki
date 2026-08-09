@@ -73,13 +73,13 @@ def test_prompt_includes_highlight_markers():
     assert "key mechanism" in prompt_arg
 
 
-def test_parse_cards_attaches_highlight_screenshots():
+def test_parse_cards_attaches_screenshot_for_selected_highlight_index():
     strategy = _make_strategy()
     chunk = _make_highlight_chunk()
 
     response_data = {
         "cards": [
-            {"front": "Q1", "back": "A1", "page_citation": "p. 1", "core_concept": "X"},
+            {"front": "Q1", "back": "A1", "page_citation": "p. 1", "core_concept": "X", "highlight_index": 1},
         ]
     }
     cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
@@ -87,6 +87,86 @@ def test_parse_cards_attaches_highlight_screenshots():
     assert len(cards) == 1
     assert cards[0].media == ["highlight_p1_0_abc123.png"]
     assert "highlight-priority" in cards[0].tags
+
+
+def test_parse_cards_no_image_without_highlight_index():
+    """The LLM chooses per card whether an image is relevant - a card that
+    doesn't reference a highlight_index gets no media, rather than every
+    screenshot in the chunk being attached regardless (the old behavior)."""
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {"cards": [{"front": "Q1", "back": "A1", "core_concept": "X"}]}
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].media == []
+
+
+def test_parse_cards_ignores_invalid_or_out_of_range_highlight_index():
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {
+        "cards": [
+            {"front": "Q1", "back": "A1", "core_concept": "X", "highlight_index": 99},
+            {"front": "Q2", "back": "A2", "core_concept": "X", "highlight_index": "not-a-number"},
+        ]
+    }
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].media == []
+    assert cards[1].media == []
+
+
+def test_parse_cards_embeds_image_in_front_when_requested():
+    """image_on_front: true means the image is integral to the question
+    itself, not just supporting context - it gets prepended into the Front
+    field's HTML, in addition to always populating the dedicated Image field
+    (media) that always renders on the back."""
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {
+        "cards": [
+            {"front": "What does this diagram show?", "back": "A1", "core_concept": "X",
+             "highlight_index": 1, "image_on_front": True},
+        ]
+    }
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].media == ["highlight_p1_0_abc123.png"]
+    assert cards[0].front.startswith('<img src="highlight_p1_0_abc123.png">')
+    assert cards[0].front.endswith("What does this diagram show?")
+
+
+def test_parse_cards_does_not_embed_image_in_front_by_default():
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {
+        "cards": [
+            {"front": "Q1", "back": "A1", "core_concept": "X", "highlight_index": 1},
+        ]
+    }
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].front == "Q1"
+    assert cards[0].media == ["highlight_p1_0_abc123.png"]  # still on the back via the Image field
+
+
+def test_parse_cards_embeds_image_in_cloze_text_when_requested():
+    strategy = _make_strategy()
+    chunk = _make_highlight_chunk()
+
+    response_data = {
+        "cards": [
+            {"card_type": "cloze", "cloze_text": "The {{c1::chlorophyll}} captures light.",
+             "core_concept": "X", "highlight_index": 1, "image_on_front": True},
+        ]
+    }
+    cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
+
+    assert cards[0].cloze_text.startswith('<img src="highlight_p1_0_abc123.png">')
 
 
 def test_validate_response_rejects_missing_fields():
@@ -142,7 +222,7 @@ def test_parse_cards_handles_mixed_basic_and_cloze():
         "cards": [
             {"card_type": "basic", "front": "Q1", "back": "A1", "core_concept": "X"},
             {"card_type": "cloze", "cloze_text": "Plants use {{c1::chlorophyll}} to capture light.",
-             "extra": "context", "core_concept": "Y"},
+             "extra": "context", "core_concept": "Y", "highlight_index": 1},
         ]
     }
     cards = strategy.parse_cards(response_data, chunk, pdf_metadata={"title": "Test"})
@@ -154,7 +234,7 @@ def test_parse_cards_handles_mixed_basic_and_cloze():
     assert cloze.note_type == "Cloze"
     assert cloze.cloze_text == "Plants use {{c1::chlorophyll}} to capture light."
     assert cloze.extra == "context"
-    # Both card types still get highlight screenshots attached.
+    # Cloze cards can reference a highlight_index too - image support isn't Basic-only.
     assert cloze.media == ["highlight_p1_0_abc123.png"]
 
 

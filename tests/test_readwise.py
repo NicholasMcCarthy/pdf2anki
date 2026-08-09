@@ -251,6 +251,44 @@ def test_process_readwise_document_generates_cards(multi_highlight_md):
     assert all(c.strategy == "readwise_highlight" for c in cards)
 
 
+def test_process_readwise_document_assigns_readwise_subdeck(multi_highlight_md):
+    def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
+        payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}
+        return LLMResponse(
+            content=json.dumps(payload), model=self.config.model, tokens_used=1,
+            cost_estimate=0.0, cached=False, response_time=0.0,
+        )
+
+    with patch("pdf2anki.llm.LLMProvider.generate", new=fake_generate):
+        from pdf2anki.llm import create_llm_provider
+        from pdf2anki.config import LLM as LLMConfig
+
+        llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
+        cards = process_readwise_document(
+            multi_highlight_md, llm_provider, create_prompt_manager(), deck_name="My Deck",
+        )
+
+    assert all(c.deck == "My Deck::Readwise" for c in cards)
+
+
+def test_process_readwise_document_deck_defaults_when_deck_name_omitted(multi_highlight_md):
+    def fake_generate(self, prompt, system_prompt=None, json_mode=False, max_retries=3):
+        payload = {"cards": [{"front": "Q", "back": "A", "core_concept": "X"}]}
+        return LLMResponse(
+            content=json.dumps(payload), model=self.config.model, tokens_used=1,
+            cost_estimate=0.0, cached=False, response_time=0.0,
+        )
+
+    with patch("pdf2anki.llm.LLMProvider.generate", new=fake_generate):
+        from pdf2anki.llm import create_llm_provider
+        from pdf2anki.config import LLM as LLMConfig
+
+        llm_provider = create_llm_provider(LLMConfig(provider="openai", api_key="dummy"))
+        cards = process_readwise_document(multi_highlight_md, llm_provider, create_prompt_manager())
+
+    assert all(c.deck == "PDF2Anki::Readwise" for c in cards)
+
+
 def test_find_markdown_files(tmp_path):
     (tmp_path / "a.md").write_text("# A")
     (tmp_path / "b.markdown").write_text("# B")

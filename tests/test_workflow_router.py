@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from pdf2anki.cli import app
 from pdf2anki.config import DocumentMetadata, DocumentType, DocumentsConfig
-from pdf2anki.workflow_router import Workflow, select_workflow
+from pdf2anki.workflow_router import Workflow, deck_subdeck_for_workflow, select_workflow
 
 runner = CliRunner()
 
@@ -46,6 +46,32 @@ def test_override_wins_over_detected_type():
 def test_invalid_override_falls_back_to_detection():
     metadata = DocumentMetadata(doc_type=DocumentType.RESEARCH_PAPER)
     assert select_workflow(Path("paper.pdf"), metadata, override="not-a-real-workflow") == Workflow.ACADEMIC_PAPER
+
+
+def test_deck_subdeck_readwise():
+    assert deck_subdeck_for_workflow(Workflow.READWISE) == "Readwise"
+
+
+def test_deck_subdeck_academic_paper():
+    assert deck_subdeck_for_workflow(Workflow.ACADEMIC_PAPER) == "Articles"
+
+
+def test_deck_subdeck_textbook_with_book_name():
+    assert deck_subdeck_for_workflow(Workflow.TEXTBOOK, "Intro to Biology") == "Textbooks::Intro to Biology"
+
+
+def test_deck_subdeck_textbook_without_book_name():
+    assert deck_subdeck_for_workflow(Workflow.TEXTBOOK) == "Textbooks"
+
+
+def test_deck_subdeck_generic_is_none():
+    """GENERIC/unclassified documents get no subdeck - cards stay in the
+    base deck rather than a "Generic" subdeck nobody asked for."""
+    assert deck_subdeck_for_workflow(Workflow.GENERIC) is None
+
+
+def test_deck_subdeck_book_name_ignored_for_non_textbook_workflows():
+    assert deck_subdeck_for_workflow(Workflow.READWISE, "should be ignored") == "Readwise"
 
 
 def test_scan_docs_honors_manual_workflow_override_for_unknown_doc(tmp_path):

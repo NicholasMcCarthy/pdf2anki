@@ -11,9 +11,10 @@ prompts/highlight_priority.j2.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ..chunking import TextChunk
+from ..note_types import build_image_html
 from .base import BaseStrategy, FlashcardData, default_page_citation, infer_card_type, validate_cloze_format
 
 logger = logging.getLogger(__name__)
@@ -68,31 +69,36 @@ class HighlightPriorityStrategy(BaseStrategy):
         """Parse LLM response into highlight-grounded flashcard data objects."""
         cards = []
 
-        # All highlight screenshots captured on this chunk are attached to every
-        # card generated from it. The LLM isn't asked to map individual cards to
-        # individual highlights, so this is chunk-granularity association, not a
-        # precise per-highlight one - and since a chunk can now span an entire
-        # short paper (see chunking.py:_chunk_by_highlights), that granularity can
-        # be coarse (e.g. a 10-highlight paper's every card carries all 10
-        # screenshots). Accepted as a known limitation: a substring-match
-        # heuristic (attach only the highlight whose text overlaps a given card)
-        # would be fragile against paraphrased cards and risks silently dropping
-        # a legitimate screenshot, which is worse than Anki storing a few unused
-        # media references.
-        screenshots = [
-            h["screenshot"] for h in (chunk.highlights or []) if h.get("screenshot")
-        ]
+        # 1-based, matching the "[HIGHLIGHT N]" numbering the LLM was shown
+        # in the prompt (see chunking.py:_build_highlight_markers) - lets the
+        # LLM pick which highlight's screenshot (if any) belongs on a given
+        # card via "highlight_index", instead of the old chunk-granularity
+        # behavior of attaching every screenshot in the chunk to every card.
+        screenshot_by_index = {
+            i: h["screenshot"]
+            for i, h in enumerate(chunk.highlights or [], start=1)
+            if h.get("screenshot")
+        }
 
         for card_data in response_data.get("cards", []):
             try:
                 card_type = infer_card_type(card_data)
+                screenshot = self._resolve_screenshot(card_data, screenshot_by_index)
+                media = [screenshot] if screenshot else []
+
                 common = dict(
                     page_citation=card_data.get("page_citation", default_page_citation(chunk)),
                     core_concept=card_data.get("core_concept", "Highlighted Content"),
                     difficulty=card_data.get("difficulty", "medium"),
                     tags=self._process_tags(card_data.get("tags", [])),
-                    media=list(screenshots),
+                    media=media,
                 )
+
+                # image_on_front: the LLM's judgment that the image is
+                # integral to the question itself, not just supporting
+                # context for the answer (which the dedicated Image field -
+                # see note_types.py - always shows regardless, on the back).
+                image_html = build_image_html(media) if (screenshot and card_data.get("image_on_front")) else ""
 
                 if card_type == "cloze":
                     cloze_text = card_data["cloze_text"].strip()
@@ -100,14 +106,14 @@ class HighlightPriorityStrategy(BaseStrategy):
                         continue
                     flashcard = FlashcardData(
                         note_type="Cloze",
-                        cloze_text=cloze_text,
+                        cloze_text=image_html + cloze_text,
                         extra=card_data.get("extra", "").strip(),
                         **common,
                     )
                 else:
                     flashcard = FlashcardData(
                         note_type="Basic",
-                        front=card_data["front"].strip(),
+                        front=image_html + card_data["front"].strip(),
                         back=card_data["back"].strip(),
                         **common,
                     )
@@ -119,6 +125,21 @@ class HighlightPriorityStrategy(BaseStrategy):
                 continue
 
         return cards
+
+    def _resolve_screenshot(self, card_data: Dict[str, Any], screenshot_by_index: Dict[int, str]) -> Optional[str]:
+        """Map a card's optional "highlight_index" (1-based, matching the
+        prompt's "[HIGHLIGHT N]" markers) to that highlight's screenshot
+        filename. Tolerant of a missing/invalid/out-of-range index - falls
+        back to no image rather than guessing."""
+        raw_index = card_data.get("highlight_index")
+        if raw_index in (None, "", "null"):
+            return None
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            logger.debug(f"Ignoring non-integer highlight_index: {raw_index!r}")
+            return None
+        return screenshot_by_index.get(index)
 
     def _process_tags(self, tags: List[str]) -> List[str]:
         """Process and clean tags."""

@@ -90,7 +90,7 @@ class NoteTypeManager:
         # Add provenance fields
         provenance_fields = [
             "id", "note_type", "deck", "tags", "media",
-            "source_pdf", "page_start", "page_end", "section", "ref_citation",
+            "source_pdf", "source_title", "page_start", "page_end", "section", "ref_citation",
             "llm_model", "llm_version", "strategy", "template_version",
             "created_at", "updated_at",
             "core_concept", "longtext", "original_text", "my_notes"

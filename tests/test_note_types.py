@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from pdf2anki import note_types
-from pdf2anki.note_types import get_note_type_fields
+from pdf2anki.note_types import BASIC_FIELDS, CLOZE_FIELDS, build_image_html, build_source_display, get_note_type_fields
 from pdf2anki.templates import NoteTypeManager
 
 
@@ -139,3 +139,51 @@ def test_generate_cards_threads_custom_note_type_instructions_into_prompt(tmp_pa
     prompt_arg = llm_provider.generate.call_args.kwargs["prompt"]
     assert "UNIQUE_FRONT_MARKER_XYZ" in prompt_arg
     assert "UNIQUE_BACK_MARKER_XYZ" in prompt_arg
+
+
+def test_build_source_display_combines_title_and_filename():
+    assert build_source_display("papers/transformer.pdf", "Attention Is All You Need") == (
+        "Attention Is All You Need (transformer.pdf)"
+    )
+
+
+def test_build_source_display_title_only():
+    assert build_source_display("", "Attention Is All You Need") == "Attention Is All You Need"
+
+
+def test_build_source_display_filename_only():
+    assert build_source_display("papers/untitled.pdf", "") == "untitled.pdf"
+
+
+def test_build_source_display_neither_falls_back_to_unknown():
+    assert build_source_display("", "") == "Unknown"
+
+
+def test_build_source_display_strips_directory_from_filename():
+    assert build_source_display("/a/b/c/paper.pdf", "") == "paper.pdf"
+
+
+def test_build_image_html_single_file():
+    assert build_image_html(["highlight_p1_0_abc.png"]) == '<img src="highlight_p1_0_abc.png">'
+
+
+def test_build_image_html_multiple_files():
+    html = build_image_html(["a.png", "b.png"])
+    assert html == '<img src="a.png"><img src="b.png">'
+
+
+def test_build_image_html_strips_directory():
+    assert build_image_html(["workspace/media/a.png"]) == '<img src="a.png">'
+
+
+def test_build_image_html_empty_list():
+    assert build_image_html([]) == ""
+
+
+def test_build_image_html_ignores_falsy_entries():
+    assert build_image_html(["a.png", "", None]) == '<img src="a.png">'
+
+
+def test_image_field_present_on_both_note_types():
+    assert "Image" in BASIC_FIELDS
+    assert "Image" in CLOZE_FIELDS

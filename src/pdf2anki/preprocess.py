@@ -5,11 +5,12 @@ import logging
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .chunking import TextChunker
+from .chunking import TextChunk, TextChunker
 from .config import ChunkingMode, Config
 from .dedup import create_deduplication_manager
+from .heuristics import DocumentAnalyzer
 from .ids import create_id_manager
 from .io import find_pdf_files, save_csv, save_images, save_manifest
 from .llm import create_llm_provider
@@ -25,6 +26,7 @@ from .strategies import (
 from .strategies.base import FlashcardData
 from .telemetry import create_telemetry_collector
 from .textbook import build_coverage_report, extract_outline
+from .workflow_router import Workflow, deck_subdeck_for_workflow, select_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +155,12 @@ def finalize_generation(
         card_dict["created_at"] = now
         card_dict["updated_at"] = now
 
-        # Set deck name
-        card_dict["deck"] = config.anki.deck_name
+        # Deck name: generate_cards() already set this per-card from the
+        # document's workflow classification (see process_single_pdf) -
+        # config.anki.deck_name is only a fallback for cards that somehow
+        # didn't get one set (e.g. a strategy path that bypasses the normal
+        # per-document classification step).
+        card_dict["deck"] = card_dict.get("deck") or config.anki.deck_name
 
         # card_dict["media"] already carries whatever the strategy set on the
         # FlashcardData (e.g. highlight/figure screenshot filenames) via asdict().
@@ -224,9 +230,24 @@ def process_single_pdf(
     id_manager,
     dedup_manager,
     rag_manager,
-    telemetry
+    telemetry,
+    book_name: Optional[str] = None,
+    workflow_override: Optional[str] = None,
 ) -> tuple[List[FlashcardData], List[Dict[str, Any]]]:
-    """Process a single PDF file."""
+    """Process a single PDF file.
+
+    `book_name`: for the TEXTBOOK workflow, the label this book's cards get
+    nested under (config.anki.deck_name::Textbooks::book_name) - e.g. from a
+    per-book instructions.yml's `deck_name` (see service/runner.py's
+    _effective_config_for_pdf). Falls back to the PDF's parent directory
+    name when not given, so this is optional everywhere except the watcher
+    service, which threads a per-book override through.
+
+    `workflow_override`: a manual `workflow:` value from documents.yaml
+    (DocumentConfig.workflow) - takes precedence over auto-classification
+    for the subdeck decision too, matching what it already does for
+    heuristic chunking/strategy defaults (see workflow_router.select_workflow()).
+    """
     
     logger.info(f"Processing PDF: {pdf_path}")
     telemetry.start_phase(f"pdf_extraction_{pdf_path.name}")
@@ -246,6 +267,21 @@ def process_single_pdf(
     if config.ingestion.chunking.mode == ChunkingMode.OUTLINE:
         outline_entries = extract_outline(pdf_path)
         pdf_content["outline"] = [asdict(e) for e in outline_entries]
+
+    # Workflow-based subdeck ("workflow" deck_structure - the default, see
+    # config.py::Anki.deck_structure): classify the document and resolve the
+    # deck every card from it should land in, e.g. "PDF2Anki::Articles" or
+    # "PDF2Anki::Textbooks::SomeBook". Set once here (not per-strategy) so
+    # every card generated below - including the abstract-workflow cards
+    # further down - picks it up automatically via generate_cards()'s
+    # `pdf_metadata.get("deck")` read.
+    doc_metadata = DocumentAnalyzer().analyze_document(str(pdf_path))
+    workflow = select_workflow(pdf_path, metadata=doc_metadata, override=workflow_override)
+    resolved_book_name = book_name or (pdf_path.parent.name if workflow == Workflow.TEXTBOOK else None)
+    deck_suffix = deck_subdeck_for_workflow(workflow, resolved_book_name)
+    pdf_content["metadata"]["deck"] = (
+        f"{config.anki.deck_name}::{deck_suffix}" if deck_suffix else config.anki.deck_name
+    )
 
     telemetry.end_phase()
     telemetry.start_phase(f"chunking_{pdf_path.name}")
@@ -299,7 +335,44 @@ def process_single_pdf(
     
     # Generate cards from chunks
     all_cards = []
-    
+
+    # Abstract workflow: if a real abstract was detected (see
+    # pdf.py::extract_abstract_text), generate cards from it as its own
+    # single chunk using the same "high-level, key message" key_points
+    # prompt/strategy - separate from the main highlight/section-driven
+    # chunk loop below, so the paper's core contribution gets covered even
+    # when nothing in the abstract itself was highlighted by the reader.
+    abstract_text = pdf_content["metadata"].get("abstract")
+    key_points_strategy = next((s for s in strategies if s.name == "key_points"), None)
+    if abstract_text and key_points_strategy:
+        telemetry.start_phase(f"abstract_{pdf_path.name}")
+        abstract_chunk = TextChunk(
+            text=abstract_text,
+            start_page=1,
+            end_page=1,
+            section="Abstract",
+            chunk_index=0,
+            total_chunks=1,
+        )
+        try:
+            abstract_cards = key_points_strategy.generate_cards(
+                chunk=abstract_chunk,
+                pdf_metadata=pdf_content["metadata"],
+                max_cards=key_points_strategy.config.params.get("max_cards", 5)
+            )
+            abstract_cards = key_points_strategy.deduplicate_cards(abstract_cards)
+
+            if config.hallucination.require_citations or config.hallucination.verify_quotes:
+                abstract_cards = apply_hallucination_checks(abstract_cards, abstract_chunk, config.hallucination)
+
+            all_cards.extend(abstract_cards)
+            telemetry.record_cards_generated(len(abstract_cards), "key_points")
+            logger.info(f"Generated {len(abstract_cards)} cards from the abstract of {pdf_path}")
+        except Exception as e:
+            logger.error(f"Abstract card generation failed for {pdf_path}: {e}")
+            telemetry.record_error("strategy_error", "key_points")
+        telemetry.end_phase()
+
     for chunk_idx, chunk in enumerate(chunks):
         telemetry.start_phase(f"generation_chunk_{chunk_idx}")
         telemetry.record_chunk_processed()

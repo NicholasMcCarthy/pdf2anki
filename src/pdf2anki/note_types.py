@@ -15,7 +15,7 @@ LLM is told to produce, without touching prompts/*.j2 directly.
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from .templates import NoteTypeManager
@@ -25,8 +25,45 @@ logger = logging.getLogger(__name__)
 BASIC_MODEL_NAME = "PDF2Anki Basic"
 CLOZE_MODEL_NAME = "PDF2Anki Cloze"
 
-BASIC_FIELDS = ["Front", "Back", "Source", "Page", "Section", "Tags", "Extra"]
-CLOZE_FIELDS = ["Text", "Extra", "Source", "Page", "Section", "Tags"]
+BASIC_FIELDS = ["Front", "Back", "Image", "Source", "Page", "Section", "Tags", "Extra"]
+CLOZE_FIELDS = ["Text", "Extra", "Image", "Source", "Page", "Section", "Tags"]
+
+
+def build_source_display(source_pdf: str, source_title: str) -> str:
+    """Combine a card's filename (.pdf/.md, from FlashcardData.source_pdf)
+    with its detected document title (FlashcardData.source_title - PDF
+    metadata title, Readwise article title, etc.) into the text shown in the
+    Anki "Source" field, e.g. "Attention Is All You Need
+    (transformer_paper.pdf)". Falls back to whichever one is present, and
+    only to the literal "Unknown" placeholder if neither is. Shared by
+    build.py (.apkg path) and service/ankiconnect.py (live push path) so
+    both render the same Source text.
+    """
+    filename = Path(str(source_pdf)).name if source_pdf else ""
+    title = str(source_title or "").strip()
+
+    if title and filename:
+        return f"{title} ({filename})"
+    if title:
+        return title
+    if filename:
+        return filename
+    return "Unknown"
+
+
+def build_image_html(media_filenames: List[str]) -> str:
+    """Render a card's screenshot/figure filenames (FlashcardData.media,
+    relative to Output.media_path) as <img> tags for the Anki "Image" field.
+
+    Filenames only - never a directory - since Anki (both the local .apkg's
+    genanki media_files and AnkiConnect's storeMediaFile) flattens all media
+    into the collection's single media folder; a card just references a
+    bare filename and Anki resolves it. Shared by build.py (.apkg path) and
+    service/ankiconnect.py (live push path, which also has to actually
+    upload each file via storeMediaFile - see ensure_media_uploaded()).
+    """
+    return "".join(f'<img src="{Path(name).name}">' for name in media_filenames if name)
+
 
 BASIC_QFMT = '''
     <div class="question">{{Front}}</div>
@@ -39,6 +76,7 @@ BASIC_AFMT = '''
     <hr>
     <div class="answer">{{Back}}</div>
     {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
+    {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
     <div class="source">{{Source}} - {{Page}}</div>
     {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
 '''
@@ -90,6 +128,17 @@ BASIC_CSS = '''
         font-style: italic;
     }
 
+    .image {
+        margin: 10px 0;
+        text-align: center;
+    }
+
+    .image img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 4px;
+    }
+
     /* MathJax support */
     .MathJax {
         font-size: 1.1em !important;
@@ -120,6 +169,7 @@ CLOZE_QFMT = '''
 CLOZE_AFMT = '''
     <div class="cloze-answer">{{cloze:Text}}</div>
     {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
+    {{#Image}}<div class="image">{{Image}}</div>{{/Image}}
     <div class="source">{{Source}} - {{Page}}</div>
     {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
 '''
@@ -170,6 +220,17 @@ CLOZE_CSS = '''
         font-size: 12px;
         color: #666;
         font-style: italic;
+    }
+
+    .image {
+        margin: 10px 0;
+        text-align: center;
+    }
+
+    .image img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 4px;
     }
 
     /* MathJax support */

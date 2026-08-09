@@ -7,7 +7,9 @@ push new cards into AnkiWeb automatically, hence this rather than trying to
 speak AnkiWeb's (private, undocumented) sync protocol directly.
 """
 
+import base64
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -23,6 +25,8 @@ from ..note_types import (
     CLOZE_FIELDS,
     CLOZE_MODEL_NAME,
     CLOZE_QFMT,
+    build_image_html,
+    build_source_display,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +88,16 @@ class AnkiConnectClient:
             cardTemplates=card_templates,
         )
 
+    def store_media_file(self, filename: str, data: bytes) -> None:
+        """Upload one file into the live collection's media folder
+        (storeMediaFile) so a note's Image field (an <img src="filename">
+        reference - see note_types.build_image_html()) can actually resolve
+        it. Unlike the local .apkg path (genanki bundles media into the
+        package itself), AnkiConnect has no equivalent of "attach this file
+        to my push" - each file must be uploaded individually before any
+        note referencing it is added."""
+        self.invoke("storeMediaFile", filename=filename, data=base64.b64encode(data).decode("ascii"))
+
     def add_notes(self, notes: List[Dict[str, Any]]) -> List[Optional[int]]:
         """Add notes, in AnkiConnect's own note-object shape. AnkiConnect
         returns null (not an error) per-note for ones it can't add - most
@@ -112,16 +126,18 @@ def card_row_to_note(row: Dict[str, Any], deck_name: str) -> Dict[str, Any]:
     elif not isinstance(tags, list):
         tags = []
 
-    source = row.get("source_pdf", "")
+    source = build_source_display(row.get("source_pdf", ""), row.get("source_title", ""))
     page_start = row.get("page_start")
     page = f"p. {page_start}" if page_start not in (None, "", 0) else ""
     section = row.get("section", "") or ""
     extra = row.get("extra", "") or ""
+    image_html = build_image_html(row.get("media") or [])
 
     if note_type == "Cloze":
         fields = {
             "Text": str(row.get("cloze_text", "")),
             "Extra": str(extra),
+            "Image": image_html,
             "Source": str(source),
             "Page": str(page),
             "Section": str(section),
@@ -131,6 +147,7 @@ def card_row_to_note(row: Dict[str, Any], deck_name: str) -> Dict[str, Any]:
         fields = {
             "Front": str(row.get("front", "")),
             "Back": str(row.get("back", "")),
+            "Image": image_html,
             "Source": str(source),
             "Page": str(page),
             "Section": str(section),
@@ -194,17 +211,44 @@ def _create_note_type(
         logger.warning(f"Failed to create Anki note type '{model_name}' via AnkiConnect: {e}")
 
 
+def ensure_media_uploaded(client: AnkiConnectClient, rows: List[Dict[str, Any]], media_path: Path) -> None:
+    """Upload every media file referenced by `rows` (FlashcardData.media -
+    highlight/figure screenshots) into the live collection via
+    storeMediaFile, before any note referencing them is added. Unlike the
+    local .apkg path (genanki's Package.media_files bundles files directly
+    into the package), AnkiConnect has no equivalent "attach these files to
+    this push" - each one must be uploaded individually. Best-effort per
+    file: a missing/unreadable file is logged and skipped rather than
+    aborting the whole push - the note still gets created, just with an
+    <img> tag Anki can't resolve for that one file.
+    """
+    filenames = {name for row in rows for name in (row.get("media") or []) if name}
+    for filename in filenames:
+        file_path = media_path / Path(filename).name
+        try:
+            client.store_media_file(Path(filename).name, file_path.read_bytes())
+        except Exception as e:
+            logger.warning(f"Failed to upload media file '{filename}' to AnkiConnect: {e}")
+
+
 def push_notes(
     client: AnkiConnectClient,
     deck_name: str,
     rows: List[Dict[str, Any]],
     sync_after: bool = True,
+    media_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Create the deck if needed, add the given card rows as notes, and
     optionally sync. Never raises - failures are logged and reflected in the
     returned counts so a partial or failed AnkiConnect push can be reported
     (e.g. via Slack) without crashing the pipeline; the local .apkg is always
     still written regardless of this outcome.
+
+    `media_path` (the same directory save_images() writes screenshots into -
+    see config.py's Output.media_path) is only needed if any row carries
+    `media` filenames; omit it and image-bearing cards will just have
+    dangling <img> references in the live collection until a future push
+    supplies it.
     """
     result: Dict[str, Any] = {"attempted": len(rows), "added": 0, "failed": 0, "synced": False}
     if not rows:
@@ -213,6 +257,8 @@ def push_notes(
     try:
         client.create_deck(deck_name)
         ensure_note_types(client)
+        if media_path is not None:
+            ensure_media_uploaded(client, rows, media_path)
         notes = [card_row_to_note(row, deck_name) for row in rows]
         added_ids = client.add_notes(notes)
         result["added"] = sum(1 for i in added_ids if i is not None)

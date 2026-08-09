@@ -12,6 +12,7 @@ import pandas as pd
 from pdf2anki.build import AnkiDeckBuilder, _stable_id, build_anki_deck
 from pdf2anki.config import Config
 from pdf2anki.io import save_csv
+from pdf2anki.note_types import BASIC_FIELDS, CLOZE_FIELDS
 
 
 def test_stable_id_is_deterministic():
@@ -65,6 +66,84 @@ def test_chapter_subdeck_ids_are_stable_and_keyed_by_name():
     assert decks1["Chapter 1"].deck_id != decks1["Chapter 2"].deck_id
 
 
+def test_workflow_deck_structure_is_the_default():
+    assert Config().anki.deck_structure == "workflow"
+
+
+def test_workflow_subdecks_keyed_by_full_resolved_deck_name():
+    config = Config()
+    config.anki.deck_structure = "workflow"
+    config.anki.deck_name = "My Deck"
+
+    df = pd.DataFrame([
+        {"deck": "My Deck::Readwise"},
+        {"deck": "My Deck::Articles"},
+        {"deck": "My Deck::Textbooks::Some Book"},
+    ])
+
+    builder = AnkiDeckBuilder(config.anki)
+    decks = builder._create_decks(df)
+
+    assert set(decks.keys()) >= {"My Deck::Readwise", "My Deck::Articles", "My Deck::Textbooks::Some Book"}
+    assert decks["My Deck::Readwise"].name == "My Deck::Readwise"
+    assert decks["My Deck::Textbooks::Some Book"].name == "My Deck::Textbooks::Some Book"
+
+
+def test_workflow_subdeck_ids_are_stable_and_distinct():
+    config = Config()
+    config.anki.deck_structure = "workflow"
+    config.anki.deck_name = "My Deck"
+
+    df = pd.DataFrame([{"deck": "My Deck::Readwise"}, {"deck": "My Deck::Articles"}])
+
+    decks1 = AnkiDeckBuilder(config.anki)._create_decks(df)
+    decks2 = AnkiDeckBuilder(config.anki)._create_decks(df)
+
+    assert decks1["My Deck::Readwise"].deck_id == decks2["My Deck::Readwise"].deck_id
+    assert decks1["My Deck::Readwise"].deck_id != decks1["My Deck::Articles"].deck_id
+
+
+def test_workflow_deck_structure_falls_back_to_main_for_generic_cards():
+    """A card with no resolved "deck" (e.g. GENERIC/unclassified) lands in
+    the base deck, not a missing/empty-named subdeck."""
+    config = Config()
+    config.anki.deck_structure = "workflow"
+    config.anki.deck_name = "My Deck"
+
+    df = pd.DataFrame([{"deck": ""}])
+    builder = AnkiDeckBuilder(config.anki)
+    decks = builder._create_decks(df)
+
+    assert "main" in decks
+    assert decks["main"].name == "My Deck"
+    assert builder._get_deck_for_card(df.iloc[0], decks).name == "My Deck"
+
+
+def test_workflow_deck_structure_handles_missing_deck_column():
+    """_create_decks() is sometimes called directly with a hand-built
+    DataFrame that has no "deck" column at all (not just empty values) -
+    must not crash."""
+    config = Config()
+    config.anki.deck_structure = "workflow"
+    df = pd.DataFrame([{"section": None, "strategy": "key_points"}])
+
+    decks = AnkiDeckBuilder(config.anki)._create_decks(df)
+    assert "main" in decks
+
+
+def test_get_deck_for_card_routes_to_correct_workflow_subdeck():
+    config = Config()
+    config.anki.deck_structure = "workflow"
+    config.anki.deck_name = "My Deck"
+
+    df = pd.DataFrame([{"deck": "My Deck::Readwise"}, {"deck": "My Deck::Articles"}])
+    builder = AnkiDeckBuilder(config.anki)
+    decks = builder._create_decks(df)
+
+    assert builder._get_deck_for_card(df.iloc[0], decks).name == "My Deck::Readwise"
+    assert builder._get_deck_for_card(df.iloc[1], decks).name == "My Deck::Articles"
+
+
 def test_explicit_deck_id_config_still_wins():
     config = Config()
     config.anki.deck_structure = "flat"
@@ -112,3 +191,52 @@ def test_build_anki_deck_end_to_end_writes_apkg_twice_with_same_ids(tmp_path):
 
     assert result2["total_cards"] == 1
     assert deck_id_1 == deck_id_2
+
+
+def test_basic_note_includes_image_field_from_media():
+    """Reproduces a real bug: screenshot files were bundled into the .apkg
+    (genanki.Package.media_files globs the whole media dir) but no note
+    field ever referenced them via <img>, so they were orphaned and never
+    displayed on any card."""
+    config = Config()
+    builder = AnkiDeckBuilder(config.anki)
+    row = pd.Series({
+        "front": "Q", "back": "A", "media": ["highlight_p1_0_abc.png"],
+        "source_pdf": "test.pdf", "source_title": "", "page_start": 1, "page_end": 1,
+        "section": "", "tags": [], "extra": "",
+    })
+
+    note = builder._create_basic_note(row, builder.note_types["Basic"])
+
+    image_field_index = BASIC_FIELDS.index("Image")
+    assert note.fields[image_field_index] == '<img src="highlight_p1_0_abc.png">'
+
+
+def test_cloze_note_includes_image_field_from_media():
+    config = Config()
+    builder = AnkiDeckBuilder(config.anki)
+    row = pd.Series({
+        "cloze_text": "The {{c1::mitochondria}} is...", "extra": "",
+        "media": ["fig_p2_0_def.png"],
+        "source_pdf": "test.pdf", "source_title": "", "page_start": 2, "page_end": 2,
+        "section": "", "tags": [],
+    })
+
+    note = builder._create_cloze_note(row, builder.note_types["Cloze"])
+
+    image_field_index = CLOZE_FIELDS.index("Image")
+    assert note.fields[image_field_index] == '<img src="fig_p2_0_def.png">'
+
+
+def test_basic_note_image_field_empty_without_media():
+    config = Config()
+    builder = AnkiDeckBuilder(config.anki)
+    row = pd.Series({
+        "front": "Q", "back": "A", "media": [],
+        "source_pdf": "test.pdf", "source_title": "", "page_start": 1, "page_end": 1,
+        "section": "", "tags": [], "extra": "",
+    })
+
+    note = builder._create_basic_note(row, builder.note_types["Basic"])
+
+    assert note.fields[BASIC_FIELDS.index("Image")] == ""

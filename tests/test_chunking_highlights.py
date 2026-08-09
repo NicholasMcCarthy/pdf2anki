@@ -127,7 +127,7 @@ def test_small_paper_produces_single_chunk_with_inline_highlights():
     assert chunk.start_page == 1
     assert chunk.end_page == 2
     assert chunk.highlights == annotations
-    assert "[HIGHLIGHT - reader]: X matters because Y" in chunk.text
+    assert "[HIGHLIGHT 1 - reader]: X matters because Y" in chunk.text
     assert "[PAGE 1]:" in chunk.text
     assert "[PAGE 2]:" in chunk.text
 
@@ -214,7 +214,7 @@ def test_large_paper_uses_smart_chunking_with_per_chunk_highlights():
     assert len(highlighted_chunks) == 1
     hc = highlighted_chunks[0]
     assert hc.start_page <= 3 <= hc.end_page
-    assert "[HIGHLIGHT - reader]: an important claim" in hc.text
+    assert "[HIGHLIGHT 1 - reader]: an important claim" in hc.text
     assert "[PAGE CONTEXT]:" in hc.text
 
 

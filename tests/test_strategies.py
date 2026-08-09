@@ -111,6 +111,8 @@ def test_key_points_strategy_valid_response(mock_llm_provider, mock_prompt_manag
     assert card1.page_end == 1
     assert card1.strategy == "key_points"
     assert "key-points" in card1.tags
+    assert card1.source_pdf == "test.pdf"
+    assert card1.source_title == "Introduction to Machine Learning"
     
     # Verify prompt was called correctly
     mock_prompt_manager.render_template.assert_called_once()

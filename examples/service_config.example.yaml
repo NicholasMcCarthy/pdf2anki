@@ -20,7 +20,9 @@ pipeline:
 generate:
   anki:
     deck_name: My PDF2Anki Deck
-    deck_structure: flat          # flat|chapter|theme|predefined
+    deck_structure: workflow      # workflow|flat|chapter|theme - "workflow" nests each
+                                   # source (Readwise/Articles/Textbooks::BookName) in
+                                   # its own subdeck under deck_name
   output:
     workspace: /home/pdf2anki/workspace
     csv_path: /home/pdf2anki/workspace/cards.csv

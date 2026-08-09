@@ -77,7 +77,9 @@ class FlashcardData:
     extra: Optional[str] = None
 
     # Metadata fields
-    source_pdf: str = ""
+    source_pdf: str = ""  # file path (.pdf/.md) - shown as the filename on the card
+    source_title: str = ""  # detected document title (PDF metadata title, Readwise article title, etc.)
+    deck: str = ""  # fully-resolved Anki deck name (e.g. "PDF2Anki::Articles") - see workflow_router.deck_subdeck_for_workflow()
     page_start: int = 0
     page_end: int = 0
     section: Optional[str] = None
@@ -209,6 +211,8 @@ class BaseStrategy(ABC):
             # Add common metadata
             for card in cards:
                 card.source_pdf = str(pdf_metadata.get("path", ""))
+                card.source_title = card.source_title or str(pdf_metadata.get("title", ""))
+                card.deck = card.deck or str(pdf_metadata.get("deck", ""))
                 card.page_start = chunk.start_page
                 card.page_end = chunk.end_page
                 card.section = chunk.section
