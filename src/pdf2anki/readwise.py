@@ -1,0 +1,260 @@
+"""Readwise/Obsidian-plugin markdown export ingestion.
+
+Handles the format produced by the Readwise Obsidian plugin (and similarly by
+Readwise Reader's "Export to Markdown"): YAML frontmatter (title/author/url/
+category/tags), an H1 title line, and a "## Highlights" section containing one
+Obsidian callout block per highlight - `> [!info]  [icon](readwise-deep-link)`
+followed by the highlighted text, which may itself contain markdown links or
+footnote-style citations.
+
+Only a single-highlight sample was available while building this, so the
+block-splitting in _parse_highlights() is deliberately tolerant of 0, 1, or
+many highlight blocks and doesn't hard-fail on unrecognized callout types -
+a non-"info" callout (e.g. a user's own annotation on a highlight) is folded
+into the preceding highlight's `note` rather than treated as a parse error.
+"""
+
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+from .chunking import TextChunk
+from .config import Strategy as StrategyConfig
+from .strategies.base import FlashcardData
+from .strategies.readwise_highlight import ReadwiseHighlightStrategy
+from .workflow_router import Workflow, deck_subdeck_for_workflow
+
+logger = logging.getLogger(__name__)
+
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
+_H1_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
+_HEADING_LINK_RE = re.compile(r"\s*\[[^\]]*\]\([^)]*\)\s*$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_CALLOUT_RE = re.compile(r"^\[!(\w+)\]\s*(.*)$")
+_LINK_URL_RE = re.compile(r"\[[^\]]*\]\((https?://[^)]+)\)")
+
+
+@dataclass
+class ReadwiseHighlight:
+    """A single highlighted passage, with any user note folded in."""
+    text: str
+    note: Optional[str] = None
+    source_url: Optional[str] = None
+    callout_type: str = "info"
+
+
+@dataclass
+class ReadwiseDocument:
+    """A parsed Readwise/Obsidian markdown export: one source document (article,
+    webpage, book, etc.) and the highlights saved from it."""
+    title: str
+    highlights: List[ReadwiseHighlight] = field(default_factory=list)
+    author: Optional[str] = None
+    url: Optional[str] = None
+    category: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    created: Optional[str] = None
+    source_path: Optional[str] = None
+
+
+def parse_readwise_markdown(path: Path) -> ReadwiseDocument:
+    """Parse a Readwise/Obsidian-export markdown file into a ReadwiseDocument."""
+    raw = Path(path).read_text(encoding="utf-8")
+
+    frontmatter: Dict[str, Any] = {}
+    body = raw
+    fm_match = _FRONTMATTER_RE.match(raw)
+    if fm_match:
+        try:
+            frontmatter = yaml.safe_load(fm_match.group(1)) or {}
+        except yaml.YAMLError as e:
+            logger.warning(f"Failed to parse frontmatter in {path}: {e}")
+        body = fm_match.group(2)
+
+    title = frontmatter.get("title")
+    if not title:
+        h1_match = _H1_RE.search(body)
+        if h1_match:
+            title = _HEADING_LINK_RE.sub("", h1_match.group(1)).strip()
+    if not title:
+        title = Path(path).stem
+
+    highlights = _parse_highlights(body)
+
+    tags = frontmatter.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+    created = frontmatter.get("created")
+
+    doc = ReadwiseDocument(
+        title=str(title),
+        highlights=highlights,
+        author=frontmatter.get("author"),
+        url=frontmatter.get("url"),
+        category=frontmatter.get("category"),
+        tags=[str(t) for t in tags],
+        created=str(created) if created else None,
+        source_path=str(path),
+    )
+
+    logger.info(f"Parsed {len(highlights)} highlights from {path}")
+    return doc
+
+
+def _parse_highlights(body: str) -> List[ReadwiseHighlight]:
+    """Extract highlight callout blocks from the (post-frontmatter) document body."""
+    lines = body.splitlines()
+
+    # Narrow to a "## Highlights"-ish section if one exists; otherwise scan the
+    # whole body, since not every export necessarily uses that exact heading.
+    start, end = 0, len(lines)
+    for i, line in enumerate(lines):
+        heading = _HEADING_RE.match(line)
+        if heading and "highlight" in heading.group(2).lower():
+            start = i + 1
+            level = len(heading.group(1))
+            for j in range(start, len(lines)):
+                next_heading = _HEADING_RE.match(lines[j])
+                if next_heading and len(next_heading.group(1)) <= level:
+                    end = j
+                    break
+            break
+
+    highlights: List[ReadwiseHighlight] = []
+    current_lines: List[str] = []
+    current_type = "info"
+    current_source_url: Optional[str] = None
+
+    def flush() -> None:
+        nonlocal current_lines, current_type, current_source_url
+        text = "\n".join(l for l in current_lines if l.strip()).strip()
+        current_lines = []
+        if not text:
+            return
+        if current_type == "info" or not highlights:
+            highlights.append(ReadwiseHighlight(
+                text=text, source_url=current_source_url, callout_type=current_type
+            ))
+        else:
+            # A non-"info" callout right after a highlight is treated as the
+            # reader's own note on it, not a second highlight.
+            prev = highlights[-1]
+            prev.note = f"{prev.note}\n{text}" if prev.note else text
+
+    for raw_line in lines[start:end]:
+        line = raw_line.rstrip()
+
+        if not line.strip():
+            if current_lines:
+                flush()
+            continue
+
+        if not line.lstrip().startswith(">"):
+            if current_lines:
+                flush()
+            continue
+
+        content = line.lstrip()[1:].strip()  # drop the leading "> "
+        callout = _CALLOUT_RE.match(content)
+        if callout:
+            if current_lines:
+                flush()
+            current_type = callout.group(1).lower()
+            remainder = callout.group(2).strip()
+            url_match = _LINK_URL_RE.search(remainder)
+            current_source_url = url_match.group(1) if url_match else None
+            continue
+
+        current_lines.append(content)
+
+    if current_lines:
+        flush()
+
+    return highlights
+
+
+def readwise_document_to_single_chunk(doc: ReadwiseDocument) -> TextChunk:
+    """Batch every highlight (and its note, if any) into ONE chunk - numbered
+    [HIGHLIGHT N]/[NOTE N] blocks - for a single generate_cards() call instead
+    of one call per highlight. Replaces the old per-highlight chunking (and
+    the "other highlights as context" mechanism that existed only to work
+    around N separate calls not seeing each other) with a single call that
+    simply has everything present at once.
+    """
+    parts = []
+    for i, highlight in enumerate(doc.highlights, start=1):
+        block = f"[HIGHLIGHT {i}]: {highlight.text}"
+        if highlight.note:
+            block += f"\n[NOTE {i}]: {highlight.note}"
+        parts.append(block)
+
+    return TextChunk(
+        text="\n\n".join(parts),
+        start_page=0,
+        end_page=0,
+        section=doc.title,
+        chunk_index=0,
+        total_chunks=1,
+    )
+
+
+def process_readwise_document(
+    path: Path,
+    llm_provider,
+    prompt_manager,
+    strategy_config: Optional[StrategyConfig] = None,
+    max_cards_per_highlight: int = 2,
+    deck_name: str = "PDF2Anki",
+) -> List[FlashcardData]:
+    """Parse a Readwise markdown export and generate cards for ALL of its
+    highlights in a single ReadwiseHighlightStrategy call, instead of one call
+    per highlight - see readwise_document_to_single_chunk().
+
+    `deck_name` is the configured base deck (Anki.deck_name) - cards land in
+    its "Readwise" subdeck (see workflow_router.deck_subdeck_for_workflow())
+    under the default "workflow" deck_structure.
+    """
+    if strategy_config is None:
+        strategy_config = StrategyConfig(
+            name="readwise_highlight", prompt="readwise_highlight", note="basic", enabled=True
+        )
+
+    strategy = ReadwiseHighlightStrategy(
+        llm_provider=llm_provider,
+        prompt_manager=prompt_manager,
+        strategy_config=strategy_config,
+        strategy_name="readwise_highlight",
+    )
+
+    doc = parse_readwise_markdown(path)
+    if not doc.highlights:
+        logger.info(f"No highlights found in {path}, skipping")
+        return []
+
+    chunk = readwise_document_to_single_chunk(doc)
+
+    pdf_metadata = {
+        "title": doc.title,
+        "author": doc.author or "",
+        "path": doc.source_path,
+        "source_url": doc.url or "",
+        "category": doc.category,
+        "extra_tags": doc.tags,
+        "highlight_count": len(doc.highlights),
+        "deck": f"{deck_name}::{deck_subdeck_for_workflow(Workflow.READWISE)}",
+    }
+
+    # `max_cards` here is deliberately the PER-highlight cap (matching the
+    # template's own "up to N cards per highlight" framing), not a per-call
+    # total like every other strategy's use of generate_cards(max_cards=...) -
+    # the template multiplies it out into a soft total budget itself.
+    cards = strategy.generate_cards(chunk, pdf_metadata, max_cards=max_cards_per_highlight)
+    all_cards = strategy.deduplicate_cards(cards)
+
+    logger.info(f"Generated {len(all_cards)} cards from {len(doc.highlights)} highlights in {path} (1 call)")
+    return all_cards

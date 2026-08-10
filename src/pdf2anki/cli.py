@@ -1,6 +1,7 @@
 """Command-line interface for pdf2anki."""
 
 import shutil
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Optional, List
 import glob
@@ -13,16 +14,20 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .build import build_anki_deck
-from .config import Config, DocumentsConfig
-from .heuristics import DocumentAnalyzer
-from .io import clear_cache, load_csv, preview_cards
+from .config import Chunking, Config, DocumentsConfig, DocumentType
+from .heuristics import DocumentAnalyzer, get_heuristic_defaults
+from .ids import create_id_manager
+from .io import clear_cache, find_markdown_files, load_csv, merge_cards_into_csv, preview_cards, save_csv
+from .readwise import process_readwise_document
 from .validate import validate_csv
+from .workflow_router import WORKFLOW_TO_DOCUMENT_TYPE, select_workflow
 
 # Import functions used by tests
 from .pdf import PDFProcessor
 from .chunking import TextChunker
 from .llm import create_llm_provider
-from .templates import get_note_type_manager, NoteTypeManager, PromptManager
+from .preprocess import process_single_pdf
+from .templates import get_note_type_manager, NoteTypeManager
 
 app = typer.Typer(
     name="pdf2anki",
@@ -36,26 +41,24 @@ def _get_template_managers(current_dir: Path = Path.cwd()):
     """Get template managers, using init directories if they exist."""
     init_prompts_dir = current_dir / "prompts"
     init_notes_dir = current_dir / "notes"
-    
+
     # Check if we're in an initialized directory with custom templates
     if init_prompts_dir.exists() and init_notes_dir.exists():
         console.print(f"📁 Using templates from init directory: {current_dir}", style="yellow")
-        
+
         # Create custom managers using init directories
         from .prompts import create_prompt_manager
         prompt_manager = create_prompt_manager(init_prompts_dir)
         note_type_manager = NoteTypeManager(init_notes_dir)
-        template_prompt_manager = PromptManager(init_prompts_dir)
-        
-        return prompt_manager, note_type_manager, template_prompt_manager
+
+        return prompt_manager, note_type_manager
     else:
         # Use default managers
         from .prompts import create_prompt_manager
         prompt_manager = create_prompt_manager()
         note_type_manager = get_note_type_manager()
-        template_prompt_manager = PromptManager()
-        
-        return prompt_manager, note_type_manager, template_prompt_manager
+
+        return prompt_manager, note_type_manager
 
 
 @app.command()
@@ -287,6 +290,7 @@ def scan_docs(
         results_table.add_column("File", style="cyan")
         results_table.add_column("Pages", justify="right")
         results_table.add_column("Type", style="green")
+        results_table.add_column("Workflow", style="magenta")
         results_table.add_column("TOC", justify="center")
         results_table.add_column("Chapters", justify="center")
         results_table.add_column("2-col", justify="center")
@@ -305,15 +309,43 @@ def scan_docs(
                 
                 # Analyze document
                 metadata = analyzer.analyze_document(pdf_path)
-                
+
                 # Add to documents config
                 documents_config.add_or_update_document(pdf_path, metadata)
-                
+
+                # Resolve the workflow (honoring any manual override already set
+                # on this document) and apply heuristic chunking/strategy/
+                # annotation-extraction defaults for it. Only do this when the
+                # resolved workflow isn't GENERIC: get_effective_config() treats
+                # heuristic_* as taking precedence over the user's global
+                # config.yaml, so writing a heuristic suggestion for every
+                # document - including a bland generic one - would silently
+                # override explicit user config on any document that isn't
+                # confidently classified (or manually routed) as a paper or textbook.
+                doc_config = documents_config.documents[Path(pdf_path).name]
+                workflow = select_workflow(Path(pdf_path), metadata, override=doc_config.workflow)
+                doc_config.workflow = workflow.value
+
+                effective_doc_type = WORKFLOW_TO_DOCUMENT_TYPE.get(workflow, DocumentType.UNKNOWN)
+                if effective_doc_type != DocumentType.UNKNOWN:
+                    effective_metadata = replace(metadata, doc_type=effective_doc_type)
+                    defaults = get_heuristic_defaults(effective_metadata)
+                    if "chunking_mode" in defaults:
+                        doc_config.heuristic_chunking = Chunking(
+                            mode=defaults["chunking_mode"],
+                            tokens_per_chunk=defaults.get("tokens_per_chunk", 2000),
+                        )
+                    if "strategies" in defaults:
+                        doc_config.heuristic_strategies = defaults["strategies"]
+                    if "extract_annotations" in defaults:
+                        doc_config.heuristic_extract_annotations = defaults["extract_annotations"]
+
                 # Add to results table
                 results_table.add_row(
                     Path(pdf_path).name,
                     str(metadata.page_count),
-                    metadata.doc_type.value,
+                    metadata.doc_type,
+                    workflow.value,
                     "✓" if metadata.toc_present else "✗",
                     "✓" if metadata.chapters_detected else "✗",
                     "✓" if metadata.two_column_layout else "✗",
@@ -333,7 +365,7 @@ def scan_docs(
         doc_types = {}
         for doc_config in documents_config.documents.values():
             if doc_config.metadata:
-                doc_type = doc_config.metadata.doc_type.value
+                doc_type = doc_config.metadata.doc_type
                 doc_types[doc_type] = doc_types.get(doc_type, 0) + 1
         
         summary_lines = [
@@ -382,7 +414,7 @@ def generate(
             base_config = Config()
         
         # Get template managers (using init directories if available)
-        prompt_manager, note_type_manager, template_prompt_manager = _get_template_managers()
+        prompt_manager, note_type_manager = _get_template_managers()
         
         # Handle plan-sample-csv first as it doesn't need documents.yaml
         if plan_sample_csv:
@@ -447,7 +479,7 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
         
         metadata_table.add_row("File Path", doc_config.file_path)
         metadata_table.add_row("Pages", str(doc_config.metadata.page_count))
-        metadata_table.add_row("Document Type", doc_config.metadata.doc_type.value)
+        metadata_table.add_row("Document Type", doc_config.metadata.doc_type)
         metadata_table.add_row("Has TOC", "✓" if doc_config.metadata.toc_present else "✗")
         metadata_table.add_row("Has DOI", "✓" if doc_config.metadata.has_doi else "✗")
         
@@ -455,7 +487,7 @@ def _show_generation_plan(documents: dict, base_config: Config, documents_config
         
         # Show effective configuration
         console.print("⚙️  Effective Configuration:", style="yellow")
-        console.print(f"  Chunking: {effective_config.ingestion.chunking.mode.value}")
+        console.print(f"  Chunking: {effective_config.ingestion.chunking.mode}")
         console.print(f"  Tokens per chunk: {effective_config.ingestion.chunking.tokens_per_chunk}")
         console.print(f"  Enabled strategies: {list(effective_config.strategies.__dict__.keys())[:3]}...")  # TODO: Show actual enabled strategies
         
@@ -697,18 +729,344 @@ def _generate_sample_csv_schema(base_config: Config, note_type_manager=None) -> 
     console.print(preview_table)
 
 
+@app.command(name="generate-readwise")
+def generate_readwise(
+    path: Path = typer.Option(..., "--path", "-p", help="Markdown file or directory of Readwise/Obsidian exports"),
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to configuration file"),
+    max_cards: int = typer.Option(2, "--max-cards", help="Max cards to generate per highlight"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+) -> None:
+    """Generate flashcards from Readwise/Obsidian markdown highlight exports.
+
+    Cards are merged into the same CSV output as `generate` (by content-hash
+    id, so re-running is safe) rather than overwriting it, so PDF- and
+    Readwise-derived cards can accumulate into one deck.
+    """
+    console.print("📚 Generating flashcards from Readwise highlights...", style="bold blue")
+
+    try:
+        base_config = Config.from_yaml(config_path) if config_path and config_path.exists() else Config()
+        base_config.create_workspace()
+
+        md_files = find_markdown_files([path]) if path.is_dir() else [path]
+        if not md_files:
+            console.print(f"❌ No markdown files found at {path}", style="red")
+            raise typer.Exit(code=1)
+
+        console.print(f"📄 Found {len(md_files)} markdown files")
+
+        prompt_manager, _ = _get_template_managers()
+        llm_provider = create_llm_provider(base_config.llm)
+        id_manager = create_id_manager(base_config.ids)
+
+        all_cards = []
+        for md_path in md_files:
+            console.print(f"  📄 Processing {md_path.name}...")
+            try:
+                cards = process_readwise_document(
+                    md_path, llm_provider, prompt_manager, max_cards_per_highlight=max_cards,
+                    deck_name=base_config.anki.deck_name,
+                )
+                all_cards.extend(cards)
+                console.print(f"     ✅ {len(cards)} cards generated")
+            except Exception as e:
+                console.print(f"     ❌ Failed to process {md_path.name}: {e}", style="red")
+                if verbose:
+                    console.print_exception()
+                continue
+
+        if not all_cards:
+            console.print("⚠️  No cards generated from any Readwise file.", style="yellow")
+            return
+
+        now = datetime.now().isoformat()
+        new_rows = []
+        for card in all_cards:
+            card_dict = asdict(card)
+            card_dict["id"] = id_manager.generate_id(card)
+            card_dict["created_at"] = now
+            card_dict["updated_at"] = now
+            card_dict["deck"] = card_dict.get("deck") or base_config.anki.deck_name
+            card_dict["longtext"] = ""
+            card_dict["my_notes"] = ""
+            new_rows.append(card_dict)
+
+        merge_result = merge_cards_into_csv(new_rows, base_config.output.csv_path)
+
+        console.print(Panel.fit(
+            f"✅ Readwise generation complete!\n\n"
+            f"Files processed: {len(md_files)}\n"
+            f"New cards: {merge_result['added']}\n"
+            f"Total cards in CSV: {merge_result['total']}\n"
+            f"CSV: {base_config.output.csv_path}",
+            title="Success",
+            style="green"
+        ))
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"❌ Error during Readwise generation: {e}", style="bold red")
+        if verbose:
+            console.print_exception()
+        raise typer.Exit(code=1)
+
+
+def _resolve_state_path(config: Config) -> Path:
+    """Where the watcher's seen-file state (see service/watcher.py::WatcherState)
+    lives - defaults into the workspace dir (already a persistent volume in
+    the Docker deployment) so it survives container restarts/rebuilds, but
+    is overridable via Service.state_path."""
+    return (
+        Path(config.service.state_path) if config.service.state_path
+        else Path(config.output.workspace) / "watcher_state.json"
+    )
+
+
+@app.command()
+def serve(
+    config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+    reset_state: bool = typer.Option(
+        False, "--reset-state",
+        help="Forget every previously-processed file (successes AND errors) before starting, "
+             "so the startup scan reprocesses everything found in the watch directories.",
+    ),
+    retry_errors: bool = typer.Option(
+        False, "--retry-errors",
+        help="Forget only files that previously errored (leaving already-succeeded files alone) "
+             "before starting, so the startup scan retries them. Errored files are never "
+             "auto-retried otherwise - see `pdf2anki watch-status` to inspect them first.",
+    ),
+) -> None:
+    """Run the watcher service: watch configured directories for new PDFs/
+    textbooks/Readwise markdown files, classify and process each one, keep
+    the Anki deck up to date, and optionally push to AnkiConnect/Slack.
+
+    This is the entrypoint the Docker service container runs.
+    """
+    import logging as _logging
+
+    from .service import DirectoryWatcher, process_new_file
+    from .service.notify import notify_error, notify_file_processed, notify_startup
+
+    if verbose:
+        _logging.getLogger("pdf2anki").setLevel(_logging.DEBUG)
+    else:
+        _logging.basicConfig(level=_logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    config = Config.from_yaml(config_path)
+    webhook_url = config.service.notifications.slack_webhook_url
+    state_path = _resolve_state_path(config)
+
+    console.print("🔭 Starting pdf2anki watcher service...", style="bold blue")
+    watch_dirs = {
+        "pdfs": config.service.watch_dirs.pdfs,
+        "textbooks": config.service.watch_dirs.textbooks,
+        "readwise": config.service.watch_dirs.readwise,
+    }
+    for name, path in watch_dirs.items():
+        console.print(f"  📁 {name}: {path}")
+
+    if config.service.notifications.notify_on_processed:
+        notify_startup(webhook_url, watch_dirs)
+
+    def on_file(path: Path) -> None:
+        console.print(f"📄 New file detected: {path}")
+        try:
+            result = process_new_file(path, config)
+            console.print(
+                f"   ✅ {result['workflow']}: {result['cards_generated']} cards "
+                f"(+{result['cards_added']} new)"
+            )
+            if config.service.notifications.notify_on_processed:
+                notify_file_processed(webhook_url, result)
+        except Exception as e:
+            console.print(f"   ❌ Failed to process {path}: {e}", style="red")
+            if verbose:
+                console.print_exception()
+            if config.service.notifications.notify_on_error:
+                notify_error(webhook_url, str(path), str(e))
+            # Re-raise (DirectoryWatcher.handle() catches this itself, so it
+            # never crashes the watch loop) so the failure reaches handle(),
+            # which records it as an error rather than a success. Errored
+            # files are then skipped - not silently retried - on every
+            # future reconciliation pass, so a persistent failure (e.g.
+            # exhausted API credits) doesn't burn credits retrying the same
+            # doomed call against every matching file every poll interval.
+            # Use --retry-errors (or `pdf2anki watch-status --retry-errors`)
+            # once the underlying problem is fixed.
+            raise
+
+    watcher = DirectoryWatcher(
+        directories=[watch_dirs["pdfs"], watch_dirs["textbooks"], watch_dirs["readwise"]],
+        on_file=on_file,
+        debounce_seconds=config.service.debounce_seconds,
+        state_path=state_path,
+        poll_interval_seconds=config.service.poll_interval_seconds,
+    )
+    if reset_state:
+        console.print("♻️  --reset-state: forgetting all previously-processed files")
+        watcher.reset_state()
+    elif retry_errors:
+        cleared = watcher.retry_errors()
+        console.print(f"♻️  --retry-errors: cleared {cleared} errored file(s) for retry")
+    watcher.run_forever()
+
+
+@app.command(name="watch-status")
+def watch_status(
+    config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
+    show_errors: bool = typer.Option(True, "--errors/--no-errors", help="List errored files and their error message."),
+    show_processed: bool = typer.Option(False, "--processed", help="Also list successfully-processed files."),
+    retry_errors: bool = typer.Option(
+        False, "--retry-errors",
+        help="Clear error state so the next `pdf2anki serve` run retries these files "
+             "(does not itself reprocess anything - just clears the 'don't retry' marker).",
+    ),
+    path: Optional[Path] = typer.Option(
+        None, "--path", help="Limit --retry-errors to just this one file (default: all errored files).",
+    ),
+) -> None:
+    """Inspect (and optionally clear) the watcher service's persisted
+    seen-file state (service/watcher.py::WatcherState) without starting the
+    full `pdf2anki serve` watch loop - useful for checking what errored
+    (e.g. after API credits ran out) before deciding whether/what to retry.
+    """
+    from .service import WatcherState
+
+    config = Config.from_yaml(config_path)
+    state_path = _resolve_state_path(config)
+    state = WatcherState(state_path)
+
+    if retry_errors:
+        cleared = state.retry_errors([path] if path else None)
+        console.print(f"♻️  Cleared {cleared} errored file(s) - they'll be retried on the next `pdf2anki serve` run.")
+        return
+
+    console.print(f"📄 Watcher state: {state_path}")
+    errors = state.errors()
+    successes = state.successes()
+    console.print(f"  ✅ {len(successes)} processed successfully")
+    console.print(f"  ❌ {len(errors)} errored" + (" (not auto-retried)" if errors else ""))
+
+    if show_errors and errors:
+        table = Table(title="Errored files")
+        table.add_column("Path")
+        table.add_column("Attempts")
+        table.add_column("Last error")
+        for file_path, entry in sorted(errors.items()):
+            table.add_row(file_path, str(entry.get("attempts", "?")), str(entry.get("error", ""))[:200])
+        console.print(table)
+        console.print("Retry with: pdf2anki watch-status --config ... --retry-errors [--path <file>]")
+
+    if show_processed and successes:
+        table = Table(title="Processed files")
+        table.add_column("Path")
+        table.add_column("Attempts")
+        for file_path, entry in sorted(successes.items()):
+            table.add_row(file_path, str(entry.get("attempts", "?")))
+        console.print(table)
+
+
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:
-    """Run full generation process."""
+    """Run full generation process.
+
+    Mirrors preprocess.preprocess_pdf()'s orchestration, but drives it per-document
+    using documents.yaml's layered effective config (base -> heuristic -> override)
+    instead of a single global config, since each document may have its own chunking
+    mode/strategy list.
+    """
     console.print("⚡ Running full generation...", style="bold green")
-    
-    # TODO: Implement full generation orchestration
-    # This should:
-    # 1. Use documents.yaml layering for each PDF
-    # 2. Process by chunk and apply strategies in order
-    # 3. Persist CSV/media/manifest to workspace/
-    
-    console.print("  [Full generation not yet implemented]")
-    console.print("  [Would orchestrate generation using documents.yaml configuration]")
+
+    from .dedup import create_deduplication_manager
+    from .ids import create_id_manager
+    from .llm import create_llm_provider
+    from .preprocess import finalize_generation
+    from .rag import create_rag_manager
+    from .telemetry import create_telemetry_collector
+
+    base_config.create_workspace()
+
+    telemetry = create_telemetry_collector(base_config.telemetry)
+    telemetry.start_phase("initialization")
+
+    llm_provider = create_llm_provider(base_config.llm)
+    if prompt_manager is None:
+        from .prompts import create_prompt_manager
+        prompt_manager = create_prompt_manager()
+    id_manager = create_id_manager(base_config.ids)
+    dedup_manager = create_deduplication_manager(base_config.deduplication)
+    rag_manager = create_rag_manager(base_config.rag)
+
+    if base_config.ids.strategy == "persistent":
+        id_manager.load_persistent_ids(base_config.output.csv_path)
+
+    telemetry.end_phase()
+
+    all_cards = []
+    all_images = []
+    processed_files: List[Path] = []
+
+    for doc_key, doc_config in documents.items():
+        pdf_path = Path(doc_config.file_path)
+        console.print(f"  📄 Processing {doc_key}...")
+
+        try:
+            effective_config = documents_config.get_effective_config(doc_key, base_config)
+            text_chunker = TextChunker(effective_config.ingestion.chunking, effective_config.llm.model)
+
+            cards, images = process_single_pdf(
+                pdf_path=pdf_path,
+                config=effective_config,
+                llm_provider=llm_provider,
+                prompt_manager=prompt_manager,
+                text_chunker=text_chunker,
+                id_manager=id_manager,
+                dedup_manager=dedup_manager,
+                rag_manager=rag_manager,
+                telemetry=telemetry,
+                workflow_override=doc_config.workflow,
+            )
+
+            all_cards.extend(cards)
+            all_images.extend(images)
+            processed_files.append(pdf_path)
+            telemetry.record_pdf_processed()
+            console.print(f"     ✅ {len(cards)} cards generated")
+
+        except Exception as e:
+            console.print(f"     ❌ Failed to process {doc_key}: {e}", style="red")
+            if verbose:
+                console.print_exception()
+            telemetry.record_error("pdf_processing_error")
+            continue
+
+    if not processed_files:
+        console.print("❌ No documents were successfully processed.", style="red")
+        raise typer.Exit(code=1)
+
+    result = finalize_generation(
+        config=base_config,
+        all_cards=all_cards,
+        all_images=all_images,
+        dedup_manager=dedup_manager,
+        id_manager=id_manager,
+        rag_manager=rag_manager,
+        telemetry=telemetry,
+        source_files=processed_files,
+    )
+
+    console.print(Panel.fit(
+        f"✅ Generation complete!\n\n"
+        f"Documents processed: {result['processed_pdfs']}\n"
+        f"Cards generated: {result['total_cards']}\n"
+        f"Images saved: {result['images_saved']}\n"
+        f"CSV: {result['csv_path']}\n"
+        f"Manifest: {result['manifest_path']}",
+        title="Success",
+        style="green"
+    ))
 
 
 @app.command()

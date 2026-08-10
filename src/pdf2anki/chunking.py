@@ -2,6 +2,7 @@
 
 import logging
 import re
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 import tiktoken
@@ -10,19 +11,41 @@ from .config import ChunkingConfig, ChunkingMode
 
 logger = logging.getLogger(__name__)
 
+# Headings that mark the start of a terminal, never-flashcard-worthy section of
+# an academic paper - References/Bibliography/Works Cited, Appendix,
+# Supplementary Material, Acknowledgments/Funding. Matched as a whole line
+# (MULTILINE, so `^`/`$` anchor to line boundaries, including the very start
+# of a page's text - a heading is very commonly the first line of a fresh
+# page, which a "must be preceded by \n" pattern would miss). Shared by
+# _trim_terminal_sections() (entire-mode, operates on one concatenated string)
+# and _strip_terminal_sections_from_pages() (highlights-mode, operates at page
+# granularity so a paper's page_count for the single-call-vs-chunk decision
+# stays meaningful) - keep both in sync by editing only here.
+TERMINAL_SECTION_HEADING_RE = re.compile(
+    r"^[ \t]*("
+    r"References|Bibliography|Works Cited|"
+    r"Appendix(?:\s+[A-Z0-9]+)?|"
+    r"Supplementary Material(?:s)?|"
+    r"Acknowledge?ments?|Funding"
+    r")[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 class TextChunk:
     """Represents a chunk of text with metadata."""
     
     def __init__(
-        self, 
-        text: str, 
-        start_page: int, 
+        self,
+        text: str,
+        start_page: int,
         end_page: int,
         section: Optional[str] = None,
         subsection: Optional[str] = None,
         chunk_index: int = 0,
         total_chunks: int = 1,
+        chunk_type: str = "text",
+        highlights: Optional[List[Dict]] = None,
     ):
         self.text = text
         self.start_page = start_page
@@ -34,6 +57,11 @@ class TextChunk:
         self.token_count = 0
         self.word_count = len(text.split())
         self.char_count = len(text)
+        # chunk_type/highlights: populated for highlight-priority chunks (see
+        # TextChunker._chunk_by_highlights) so strategies can attach highlight
+        # screenshots to generated cards. Unused (defaults) for every other mode.
+        self.chunk_type = chunk_type
+        self.highlights = highlights
     
     def __repr__(self) -> str:
         return f"TextChunk(pages={self.start_page}-{self.end_page}, tokens={self.token_count}, section='{self.section}')"
@@ -84,6 +112,8 @@ class TextChunker:
             return self._chunk_by_highlights(pdf_content)
         elif self.config.mode == ChunkingMode.ENTIRE:
             return self._chunk_entire(pdf_content)
+        elif self.config.mode == ChunkingMode.OUTLINE:
+            return self._chunk_by_outline(pdf_content)
         else:
             raise ValueError(f"Unknown chunking mode: {self.config.mode}")
     
@@ -490,19 +520,217 @@ class TextChunker:
         logger.info("Figure-based chunking not yet implemented, falling back to smart chunking")
         return self._chunk_smart(pdf_content)
     
+    def _strip_terminal_sections_from_pages(self, pages: List[Dict]) -> List[Dict]:
+        """Remove References/Bibliography/Works Cited/Appendix/Supplementary
+        Material/Acknowledgments (and everything after) from a page list, at
+        page granularity - so academic-paper text never sends citation lists
+        or appendices to the LLM, and a paper's real page_count (used for the
+        single-call-vs-chunk size decision) isn't inflated by trailing matter
+        nobody wants cards from.
+
+        Scans pages in order; the first page whose raw_text contains a
+        terminal-section heading is truncated at that heading (keeping any
+        real content before it on that page) and every later page is dropped
+        entirely. Returns a new list of page dicts (shallow copies) - the
+        input list/dicts are never mutated.
+        """
+        result = []
+        for page in pages:
+            text = page.get("raw_text", "") or ""
+            match = TERMINAL_SECTION_HEADING_RE.search(text)
+
+            if match:
+                truncated_text = text[:match.start()].strip()
+                if truncated_text:
+                    truncated_page = dict(page)
+                    truncated_page["raw_text"] = truncated_text
+                    result.append(truncated_page)
+                logger.info(
+                    f"Stopped academic-paper text at page {page.get('page_num')} "
+                    f"(found '{match.group(1)}') - excluding it onward"
+                )
+                return result
+
+            result.append(page)
+
+        return result
+
+    def _build_highlight_markers(self, annotations: List[Dict], start_index: int = 1) -> List[str]:
+        """Render numbered [HIGHLIGHT N]/[NOTE] marker blocks for a list of
+        annotation records, in the shared format both the single-call and
+        per-chunk highlight paths use. Numbering starts at `start_index` and
+        follows `annotations`' order - callers must keep that order
+        consistent with `chunk.highlights` so a strategy's LLM response can
+        reference "highlight N" (e.g. to pick that highlight's screenshot
+        for a specific card - see strategies/highlight_priority.py) and have
+        it map unambiguously back to `chunk.highlights[N - 1]`."""
+        blocks = []
+        for i, ann in enumerate(annotations, start=start_index):
+            marker = f"[HIGHLIGHT {i}"
+            if ann.get("author"):
+                marker += f" - {ann['author']}"
+            marker += f"]: {ann['text']}"
+            if ann.get("content"):
+                marker += "\n[NOTE]: " + ann["content"]
+            blocks.append(marker)
+        return blocks
+
+    def _build_single_paper_chunk(self, pages: List[Dict], annotations: List[Dict]) -> TextChunk:
+        """Build one chunk covering an entire (already reference-stripped)
+        short paper, for a single LLM call instead of one call per page/
+        highlight. Highlight markers are inserted inline at each page's
+        position (not extracted into a separate block) so a reader-highlighted
+        passage still appears exactly where it occurs in the paper's flow."""
+        # Global 1-based index matching `annotations`' order (== the order
+        # chunk.highlights ends up in below) - kept even though markers get
+        # interleaved page-by-page, so "[HIGHLIGHT N]" numbering in the
+        # rendered text is unambiguous regardless of which page N appears on.
+        numbered = list(enumerate(annotations, start=1))
+        by_page: Dict[int, List[tuple]] = defaultdict(list)
+        for i, ann in numbered:
+            by_page[ann["page_num"]].append((i, ann))
+
+        parts = []
+        for page in pages:
+            page_num = page.get("page_num")
+            for i, ann in by_page.get(page_num, []):
+                parts.extend(self._build_highlight_markers([ann], start_index=i))
+
+            page_text = (page.get("raw_text") or "").strip()
+            if page_text:
+                parts.append(f"[PAGE {page_num}]:\n{page_text}")
+
+        chunk = TextChunk(
+            text="\n\n".join(parts),
+            start_page=pages[0]["page_num"] if pages else 1,
+            end_page=pages[-1]["page_num"] if pages else 1,
+            chunk_index=0,
+            total_chunks=1,
+            chunk_type="highlight" if annotations else "text",
+            highlights=annotations or None,
+        )
+        chunk.token_count = self.count_tokens(chunk.text)
+        return chunk
+
+    def _chunk_smart_with_highlights(self, pages: List[Dict], annotations: List[Dict], pdf_content: Dict) -> List[TextChunk]:
+        """Smart-chunk an (already reference-stripped) long paper, then attach
+        whatever highlight annotations fall within each chunk's page range -
+        so highlight_priority (which gates on `bool(chunk.highlights)`) still
+        applies to exactly the chunks that actually contain a highlight,
+        at smart-chunk granularity instead of one call per highlighted page."""
+        stripped_content = dict(pdf_content)
+        stripped_content["pages"] = pages
+        chunks = self._chunk_smart(stripped_content)
+
+        for chunk in chunks:
+            chunk_annotations = [
+                ann for ann in annotations if chunk.start_page <= ann["page_num"] <= chunk.end_page
+            ]
+            if not chunk_annotations:
+                continue
+
+            chunk.highlights = chunk_annotations
+            chunk.chunk_type = "highlight"
+            marker_blocks = self._build_highlight_markers(chunk_annotations)
+            chunk.text = "\n\n".join(marker_blocks) + f"\n\n[PAGE CONTEXT]:\n{chunk.text}"
+            chunk.token_count = self.count_tokens(chunk.text)
+
+        return chunks
+
     def _chunk_by_highlights(self, pdf_content: Dict) -> List[TextChunk]:
-        """Chunk text by highlighted content and annotations."""
-        # TODO: Implement highlights-based chunking
-        # This should:
-        # 1. Extract highlighted text from PDF annotations
-        # 2. Extract text annotations/comments
-        # 3. Create chunks based on highlighted regions
-        # 4. Include surrounding context for highlights
-        # 5. Preserve highlight metadata (color, author, date)
-        
-        logger.info("Highlights-based chunking not yet implemented, falling back to smart chunking")
-        return self._chunk_smart(pdf_content)
+        """Chunk an academic paper for the highlight_priority/key_points/
+        cloze_definitions strategies, minimizing LLM call count:
+
+        - References/Bibliography/Works Cited/Appendix/Supplementary Material/
+          Acknowledgments are stripped first, at page granularity, regardless
+          of paper length - never sent to the LLM.
+        - Papers at or under `config.single_call_max_pages` (default 12) get
+          exactly ONE chunk covering the whole (stripped) paper, with any
+          highlight/note markers inserted inline at their real page position
+          and every highlight's screenshot attached - one call total instead
+          of one call per highlighted page.
+        - Longer papers are smart-chunked instead; each resulting chunk picks
+          up whatever highlights fall within its own page range.
+        - A single-call chunk that turns out to be unexpectedly token-dense
+          (still possible even under the page threshold) falls back to the
+          smart-chunk path rather than risking one oversized, over-budget call.
+        """
+        pages = self._strip_terminal_sections_from_pages(pdf_content.get("pages", []))
+        retained_page_nums = {p.get("page_num") for p in pages}
+        # A highlight physically made inside a stripped section (e.g. someone
+        # highlighted a citation in the References) must not surface at all -
+        # neither as inline marker text nor as a chunk.highlights entry (which
+        # would otherwise still get its screenshot attached to generated cards
+        # even though the LLM never saw that highlight's text).
+        annotations = [
+            a for a in pdf_content.get("annotations", []) if a.get("page_num") in retained_page_nums
+        ]
+        page_count = pdf_content.get("page_count") or len(pdf_content.get("pages", []))
+        max_single_call_pages = getattr(self.config, "single_call_max_pages", 12)
+
+        if page_count <= max_single_call_pages:
+            chunk = self._build_single_paper_chunk(pages, annotations)
+            if chunk.token_count <= self.config.token_budget:
+                logger.info(
+                    f"Paper is {page_count} pages (<= {max_single_call_pages}) - "
+                    f"sending as a single {chunk.token_count}-token chunk"
+                )
+                return [chunk]
+            logger.info(
+                f"Paper is {page_count} pages but the single chunk would be "
+                f"{chunk.token_count} tokens (over budget {self.config.token_budget}) - "
+                f"falling back to smart chunking instead"
+            )
+
+        chunks = self._chunk_smart_with_highlights(pages, annotations, pdf_content)
+        logger.info(
+            f"Created {len(chunks)} chunks for a {page_count}-page paper "
+            f"({len(annotations)} highlight annotations, references/appendix stripped)"
+        )
+        return chunks
     
+    def _chunk_by_outline(self, pdf_content: Dict) -> List[TextChunk]:
+        """Chunk a textbook using its authoritative PDF outline/TOC (see
+        textbook.extract_outline(), which populates pdf_content["outline"])
+        instead of heuristic heading detection, so every outline section
+        produces at least one chunk - the basis for full-coverage generation.
+
+        Reuses the same section-text extraction and token-bounded splitting as
+        _chunk_by_sections(); the only difference is the section list's source
+        (authoritative TOC vs. detected headings).
+        """
+        outline = pdf_content.get("outline", [])
+        if not outline:
+            logger.info("No outline available for outline-driven chunking, falling back to smart chunking")
+            return self._chunk_smart(pdf_content)
+
+        chunks = []
+        for entry in outline:
+            section = {
+                "title": entry["title"],
+                "start_page": entry["start_page"],
+                "end_page": entry["end_page"],
+            }
+            section_text = self._extract_section_text(pdf_content, section)
+
+            if not section_text.strip():
+                continue
+
+            section_chunks = self._split_large_text(
+                section_text,
+                start_page=section["start_page"],
+                end_page=section["end_page"],
+                section_title=section["title"],
+            )
+            chunks.extend(section_chunks)
+
+        for i, chunk in enumerate(chunks):
+            chunk.chunk_index = i
+            chunk.total_chunks = len(chunks)
+
+        logger.info(f"Created {len(chunks)} chunks using outline-driven strategy ({len(outline)} outline entries)")
+        return chunks
+
     def _chunk_entire(self, pdf_content: Dict) -> List[TextChunk]:
         """Chunk text as entire document with optional trimming and auto-splitting."""
         logger.info("Starting entire document chunking")
@@ -561,33 +789,24 @@ class TextChunker:
         """Trim terminal sections like References, Bibliography, etc."""
         original_length = len(text)
         original_tokens = self.count_tokens(text)
-        
-        # Define patterns for terminal sections to remove
-        terminal_patterns = [
-            r'\n\s*(References|REFERENCES)\s*\n.*$',
-            r'\n\s*(Bibliography|BIBLIOGRAPHY)\s*\n.*$',
-            r'\n\s*(Works Cited|WORKS CITED)\s*\n.*$',
-            r'\n\s*(Appendix|APPENDIX)\s*\n.*$',
-            r'\n\s*(Supplementary Material|SUPPLEMENTARY MATERIAL)\s*\n.*$',
-            r'\n\s*(Acknowledgments|ACKNOWLEDGMENTS|Acknowledgements|ACKNOWLEDGEMENTS)\s*\n.*$',
-        ]
-        
+
         trimmed_text = text
         sections_removed = []
-        
-        for pattern in terminal_patterns:
-            match = re.search(pattern, trimmed_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                section_start = match.group(1) if match.groups() else "Unknown"
-                sections_removed.append(section_start)
-                trim_boundary_pos = match.start()
-                trimmed_text = trimmed_text[:match.start()] + "\n"
-                
-                # Log the trim decision with detailed boundary information
-                chars_removed = len(text) - len(trimmed_text)
-                logger.info(f"TRIM DECISION: Removed terminal section '{section_start}'")
-                logger.info(f"TRIM BOUNDARY: Position {trim_boundary_pos} in document")
-                logger.info(f"TRIM IMPACT: Removed {chars_removed} characters")
+
+        # Only the first (earliest) terminal heading matters - once one is found,
+        # everything from there on is dropped in a single cut.
+        match = TERMINAL_SECTION_HEADING_RE.search(trimmed_text)
+        if match:
+            section_start = match.group(1)
+            sections_removed.append(section_start)
+            trim_boundary_pos = match.start()
+            trimmed_text = trimmed_text[:match.start()] + "\n"
+
+            # Log the trim decision with detailed boundary information
+            chars_removed = len(text) - len(trimmed_text)
+            logger.info(f"TRIM DECISION: Removed terminal section '{section_start}'")
+            logger.info(f"TRIM BOUNDARY: Position {trim_boundary_pos} in document")
+            logger.info(f"TRIM IMPACT: Removed {chars_removed} characters")
         
         # Ensure we don't remove conclusions
         conclusion_patterns = [

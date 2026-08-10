@@ -3,6 +3,7 @@
 import hashlib
 import io
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,58 @@ import fitz  # PyMuPDF
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+_ABSTRACT_HEADING_RE = re.compile(r"^\s*abstract\s*:?\s*$", re.IGNORECASE)
+_ABSTRACT_INLINE_RE = re.compile(r"^\s*abstract[\s:.—-]+(?=\S)", re.IGNORECASE)
+_ABSTRACT_END_RE = re.compile(
+    r"^\s*(1\.?\s*)?(introduction|keywords|index terms|1\s+introduction)\b", re.IGNORECASE
+)
+
+
+def extract_abstract_text(pages_data: List[Dict], max_chars: int = 2500) -> Optional[str]:
+    """Best-effort extraction of a research paper's abstract text from its
+    first two pages, for use as always-included context in prompts (a paper's
+    core contribution/thesis is often stated in the abstract even when the
+    reader didn't highlight it directly - see the highlight_priority strategy).
+
+    Looks for a standalone "Abstract" heading (or an inline "Abstract: ..."
+    lead-in) and captures text up to the next recognized section heading
+    (Introduction/Keywords), capped at max_chars. Returns None if no abstract
+    heading is found - this is heuristic, not authoritative extraction.
+    """
+    text = "\n".join(p.get("raw_text", "") for p in pages_data[:2])
+    lines = text.split("\n")
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if _ABSTRACT_HEADING_RE.match(line):
+            start_idx = i + 1
+            break
+        if _ABSTRACT_INLINE_RE.match(line):
+            start_idx = i
+            lines[i] = _ABSTRACT_INLINE_RE.sub("", line)
+            break
+
+    if start_idx is None:
+        return None
+
+    collected: List[str] = []
+    total_len = 0
+    for line in lines[start_idx:]:
+        if _ABSTRACT_END_RE.match(line.strip()):
+            break
+        collected.append(line)
+        total_len += len(line)
+        if total_len > max_chars:
+            break
+
+    abstract = "\n".join(collected).strip()
+    if len(abstract) > max_chars:
+        # A single very long line (no internal newlines) can blow past max_chars
+        # before the per-line check above even runs once - truncate the final
+        # joined text directly rather than relying solely on line-level cutoff.
+        abstract = abstract[:max_chars].rstrip() + "..."
+    return abstract or None
 
 
 class PDFDocument:
@@ -33,7 +86,11 @@ class PDFDocument:
         """Extract PDF metadata."""
         meta = self.doc.metadata
         return {
-            "title": meta.get("title", self.path.stem),
+            # PyMuPDF's metadata dict always has a "title" key present - even
+            # for a PDF with no title set, it's "" rather than absent - so a
+            # dict.get(..., default) fallback here is dead code; it must be an
+            # explicit falsy check to ever actually catch a missing title.
+            "title": meta.get("title") or self.path.stem,
             "author": meta.get("author", ""),
             "subject": meta.get("subject", ""),
             "creator": meta.get("creator", ""),
@@ -314,6 +371,89 @@ class PDFDocument:
         
         return chapters
     
+    def extract_annotations(
+        self,
+        start_page: int = 0,
+        end_page: Optional[int] = None,
+    ) -> List[Dict]:
+        """Extract highlight/underline/squiggly/strikeout annotations and the text they cover."""
+        if end_page is None:
+            end_page = self.page_count
+
+        markup_types = {"Highlight", "Underline", "Squiggly", "StrikeOut"}
+        annotations = []
+
+        for page_num in range(start_page, min(end_page, self.page_count)):
+            page = self.doc[page_num]
+
+            for annot in page.annots() or []:
+                try:
+                    annot_type = annot.type[1] if annot.type else None
+                    if annot_type not in markup_types:
+                        continue
+
+                    vertices = annot.vertices
+                    if vertices:
+                        # Text markup annotations store 4 points (one quad) per covered line.
+                        quads = [
+                            fitz.Quad(vertices[i:i + 4]).rect
+                            for i in range(0, len(vertices), 4)
+                        ]
+                        union_rect = quads[0]
+                        for r in quads[1:]:
+                            union_rect |= r
+                        text = " ".join(
+                            page.get_textbox(r).strip() for r in quads
+                        ).strip()
+                    else:
+                        union_rect = annot.rect
+                        text = page.get_textbox(union_rect).strip()
+
+                    if not text:
+                        continue
+
+                    info = annot.info or {}
+                    colors = annot.colors or {}
+
+                    annotations.append({
+                        "page_num": page_num + 1,  # 1-indexed, matches extract_text()
+                        "type": annot_type.lower(),
+                        "text": text,
+                        "rect": tuple(union_rect),
+                        "color": colors.get("stroke"),
+                        "author": info.get("title", ""),
+                        "content": info.get("content", ""),  # user's own note on the highlight
+                        "created": info.get("creationDate", ""),
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to process annotation on page {page_num + 1}: {e}")
+                    continue
+
+        logger.info(f"Extracted {len(annotations)} highlight annotations from PDF")
+        return annotations
+
+    def render_region(
+        self,
+        page_num: int,
+        rect: Tuple[float, float, float, float],
+        padding: float = 24.0,
+        dpi: int = 150,
+    ) -> Image.Image:
+        """Render a padded region of a (1-indexed) page to a PIL Image.
+
+        Used both for highlight-region screenshots and figure/table screenshots -
+        anywhere a "screenshot" of part of a page is needed, as opposed to
+        extract_images()'s pull of embedded XObject images.
+        """
+        page = self.doc[page_num - 1]
+        clip = (fitz.Rect(rect) + (-padding, -padding, padding, padding)) & page.bound()
+
+        zoom = dpi / 72.0
+        pix = page.get_pixmap(clip=clip, matrix=fitz.Matrix(zoom, zoom))
+
+        img_data = pix.tobytes("ppm")
+        return Image.open(io.BytesIO(img_data))
+
     def get_text_hash(self) -> str:
         """Get a hash of the document's text content for caching."""
         text_content = ""
@@ -328,40 +468,96 @@ def extract_pdf_content(
     pdf_path: Path,
     extract_images: bool = True,
     extract_structure: bool = True,
-    ocr_fallback: bool = False
+    extract_annotations: bool = False,
+    ocr_fallback: bool = False,
+    annotation_screenshot_padding: float = 24.0,
+    annotation_screenshot_dpi: int = 150,
 ) -> Dict:
     """Extract comprehensive content from a PDF file."""
     logger.info(f"Processing PDF: {pdf_path}")
-    
+
     with PDFDocument(Path(pdf_path)) as pdf_doc:
         # Extract text from all pages
         pages_data = pdf_doc.extract_text()
-        
+
         # Extract images if requested
         images = []
         if extract_images:
             images = pdf_doc.extract_images()
-        
+
         # Detect structure if requested
         structure = {}
         if extract_structure:
             structure = pdf_doc.detect_structure()
-        
+
+        # Extract highlight/annotation content, rendering a screenshot of each
+        # highlighted region while the document is still open. Screenshots are
+        # appended to `images` (same shape extract_images() produces) so the
+        # existing save_images()/media pipeline persists them unchanged; the
+        # annotation record only keeps a `screenshot` filename reference.
+        annotations = []
+        if extract_annotations:
+            annotations = pdf_doc.extract_annotations()
+            for idx, ann in enumerate(annotations):
+                try:
+                    screenshot = pdf_doc.render_region(
+                        page_num=ann["page_num"],
+                        rect=ann["rect"],
+                        padding=annotation_screenshot_padding,
+                        dpi=annotation_screenshot_dpi,
+                    )
+                    content_hash = hashlib.md5(screenshot.tobytes()).hexdigest()[:12]
+                    filename = f"highlight_p{ann['page_num']}_{idx}_{content_hash}.png"
+                    images.append({
+                        "page_num": ann["page_num"],
+                        "image_index": f"highlight_{idx}",
+                        "filename": filename,
+                        "width": screenshot.width,
+                        "height": screenshot.height,
+                        "pil_image": screenshot,
+                        "bbox": ann["rect"],
+                    })
+                    ann["screenshot"] = filename
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to render screenshot for annotation on page {ann['page_num']}: {e}"
+                    )
+                    ann["screenshot"] = None
+
         # TODO: Implement OCR fallback if needed
         if ocr_fallback and not any(page["raw_text"].strip() for page in pages_data):
             logger.warning("OCR fallback requested but not implemented yet")
-        
+
+        # Copy rather than mutate pdf_doc.metadata directly - it's the same dict
+        # object PDFDocument._extract_metadata() built, and other callers may
+        # hold a reference to it.
+        metadata = dict(pdf_doc.metadata)
+        # Without this, card.source_pdf (strategies/base.py:
+        # generate_cards()'s `pdf_metadata.get("path", "")`) is always "" for
+        # every academic-PDF/textbook card - build.py's _build_source_info()
+        # then falls back to the literal string "Unknown" for every card's
+        # Source field. readwise.py's pdf_metadata already includes "path";
+        # this was the missing equivalent on the PDF side.
+        metadata["path"] = str(pdf_path)
+        abstract = extract_abstract_text(pages_data)
+        if abstract:
+            metadata["abstract"] = abstract
+
         content = {
             "path": pdf_path,
-            "metadata": pdf_doc.metadata,
+            "metadata": metadata,
             "page_count": pdf_doc.page_count,
             "pages": pages_data,
             "images": images,
             "structure": structure,
+            "annotations": annotations,
             "content_hash": pdf_doc.get_text_hash(),
         }
-    
-    logger.info(f"Extracted content from {pdf_doc.page_count} pages with {len(images)} images")
+
+    logger.info(
+        f"Extracted content from {pdf_doc.page_count} pages with {len(images)} images "
+        f"and {len(annotations)} highlight annotations"
+    )
     return content
 
 

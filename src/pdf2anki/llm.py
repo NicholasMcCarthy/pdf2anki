@@ -2,13 +2,16 @@
 
 import json
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_community.cache import SQLiteCache
 from langchain.globals import set_llm_cache
 from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 from pydantic import BaseModel
 
 from .config import Config, LLMConfig
@@ -34,35 +37,125 @@ class TokenUsage(BaseModel):
     total_tokens: int
 
 
+def _extract_text_content(content: Any) -> str:
+    """Normalize a LangChain AIMessage.content value to a plain string.
+
+    Models capable of structured/multi-block responses (e.g. extended
+    thinking) can return `content` as a list of content blocks - typically
+    dicts like {"type": "text", "text": "..."} interleaved with non-text
+    blocks (thinking, redacted_thinking, tool_use, etc.) - instead of a plain
+    string. json.loads() and downstream code expect a string; concatenate
+    just the text blocks, in order, ignoring everything else.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        result = "".join(parts)
+        if not result and content:
+            # A successful (200 OK) call that nonetheless yields no usable text -
+            # e.g. every block was "thinking"/reasoning with none marked "text".
+            # Surface exactly what came back rather than let the caller see only
+            # a downstream "Expecting value" JSON error with no clue why.
+            block_types = [b.get("type") if isinstance(b, dict) else type(b).__name__ for b in content]
+            logger.warning(
+                f"LLM response had no text content blocks (block types: {block_types}) - "
+                f"returning empty string. If this recurs, the model may be exhausting "
+                f"max_tokens on internal reasoning before emitting an answer."
+            )
+        return result
+    return str(content)
+
+
+_MARKDOWN_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*\n?(.*?)\n?```\s*$", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    """Strip a wrapping ```json ... ``` (or bare ``` ... ```) markdown code
+    fence from an LLM's JSON response, if present.
+
+    Despite every prompt asking for raw JSON, some models format their answer
+    as a fenced code block anyway. json.loads() can't parse the fence
+    markers - it fails at position 0 ("Expecting value: line 1 column 1
+    (char 0)") regardless of whether the JSON inside the fence is otherwise
+    perfectly well-formed, which looks identical to a genuinely empty
+    response unless you inspect the raw text.
+    """
+    match = _MARKDOWN_JSON_FENCE_RE.match(text)
+    return match.group(1).strip() if match else text
+
+
+def _rejects_temperature(error: Exception) -> bool:
+    """Some newer models reject the `temperature` param outright (e.g.
+    Anthropic returning a 400 "`temperature` is deprecated for this model").
+    Detected by message rather than a hardcoded model-name list, since which
+    models this applies to changes over time and isn't documented per-model
+    anywhere the config can check in advance."""
+    msg = str(error).lower()
+    return "temperature" in msg and any(
+        phrase in msg for phrase in ("deprecated", "not supported", "unsupported", "not allowed")
+    )
+
+
 class LLMProvider:
     """Base LLM provider interface."""
-    
+
     def __init__(self, config: LLMConfig):
         self.config = config
         self.total_tokens = 0
         self.total_cost = 0.0
         self.cache_hits = 0
         self.api_calls = 0
-        
+        # Proactive: known non-supporting models (see ModelRegistry.MODELS)
+        # never make a wasted first call. generate()'s reactive
+        # _rejects_temperature() fallback still covers anything uncatalogued.
+        self._omit_temperature = not ModelRegistry.supports_temperature(config.model)
+
         # Set up caching
         cache_path = ".llm_cache/langchain.db"
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
         set_llm_cache(SQLiteCache(database_path=cache_path))
-        
+
         # Initialize the LLM
         self.llm = self._initialize_llm()
-    
+
     def _initialize_llm(self):
         """Initialize the LLM instance."""
-        if self.config.provider.value == "openai":
+        temperature_kwargs = {} if self._omit_temperature else {"temperature": self.config.temperature}
+
+        if self.config.provider == "openai":
             return ChatOpenAI(
                 model=self.config.model,
-                temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
                 openai_api_key=self.config.api_key,
                 openai_api_base=self.config.base_url,
                 request_timeout=self.config.timeout,
                 max_retries=self.config.max_retries,
                 model_kwargs={"seed": self.config.seed} if self.config.seed else {},
+                **temperature_kwargs,
+            )
+        elif self.config.provider == "anthropic":
+            # Anthropic requires an explicit max_tokens (unlike OpenAI, None isn't
+            # accepted). Default raised from 4096: models that reject `temperature`
+            # (see _rejects_temperature() above) are consistent with reasoning-first
+            # models whose internal reasoning counts against the same output token
+            # budget as the visible answer - a small max_tokens risks the budget
+            # being fully consumed before any answer text is emitted, producing an
+            # empty response that still parses as a successful (200 OK) API call.
+            return ChatAnthropic(
+                model=self.config.model,
+                max_tokens=self.config.max_tokens or 8192,
+                anthropic_api_key=self.config.api_key,
+                anthropic_api_url=self.config.base_url,
+                timeout=self.config.timeout,
+                max_retries=self.config.max_retries,
+                cache=False,  # Avoid caching empty/failed Anthropic responses
+                **temperature_kwargs,
             )
         else:
             raise ValueError(f"Unsupported provider: {self.config.provider}")
@@ -82,48 +175,81 @@ class LLMProvider:
             messages.append(("system", system_prompt))
         messages.append(("human", prompt))
         
-        # Configure for JSON mode if requested
+        # Configure for JSON mode if requested. response_format={"type": "json_object"}
+        # is an OpenAI-specific feature; other providers rely on prompt instructions
+        # plus the parse-and-retry loop below.
         model_kwargs = {}
-        if json_mode and "gpt" in self.config.model.lower():
+        if json_mode and self.config.provider == "openai" and "gpt" in self.config.model.lower():
             model_kwargs["response_format"] = {"type": "json_object"}
-        
+
         for attempt in range(max_retries + 1):
             try:
-                with get_openai_callback() as cb:
-                    # Check if this is a cache hit by calling without callback first
-                    test_response = self.llm.invoke(messages, **model_kwargs)
-                    was_cached = cb.total_tokens == 0
-                    
-                    if not was_cached:
-                        # Real API call
-                        response = self.llm.invoke(messages, **model_kwargs)
-                        tokens_used = cb.total_tokens
-                        cost = cb.total_cost
-                    else:
-                        response = test_response
-                        tokens_used = 0
-                        cost = 0.0
-                        self.cache_hits += 1
-                    
+                if self.config.provider == "openai":
+                    with get_openai_callback() as cb:
+                        # Check if this is a cache hit by calling without callback first
+                        test_response = self.llm.invoke(messages, **model_kwargs)
+                        was_cached = cb.total_tokens == 0
+
+                        if not was_cached:
+                            # Real API call
+                            response = self.llm.invoke(messages, **model_kwargs)
+                            tokens_used = cb.total_tokens
+                            cost = cb.total_cost
+                        else:
+                            response = test_response
+                            tokens_used = 0
+                            cost = 0.0
+                            self.cache_hits += 1
+
+                        self.api_calls += 1
+                        self.total_tokens += tokens_used
+                        self.total_cost += cost
+                else:
+                    # get_openai_callback only instruments OpenAI calls, so for other
+                    # providers (e.g. Anthropic) skip the cache-hit heuristic rather than
+                    # report misleading zero-token/zero-cost "cache hits" for real calls.
+                    response = self.llm.invoke(messages, **model_kwargs)
+                    was_cached = False
+                    tokens_used = 0
+                    cost = 0.0
                     self.api_calls += 1
-                    self.total_tokens += tokens_used
-                    self.total_cost += cost
                 
-                # Validate JSON if requested
+                # response.content is usually a plain string, but models capable of
+                # structured/multi-block responses (e.g. extended thinking) can return
+                # a list of content blocks instead - normalize before any string use.
+                response_text = _extract_text_content(response.content)
+
+                # Validate JSON if requested. Some models wrap their JSON answer in a
+                # ```json ... ``` fence despite being asked for raw JSON - strip that
+                # before parsing (and return the stripped version) rather than fail on
+                # the fence markers alone.
                 if json_mode:
+                    parsed_text = _strip_markdown_json_fence(response_text)
                     try:
-                        json.loads(response.content)
+                        json.loads(parsed_text)
                     except json.JSONDecodeError as e:
+                        # Log the actual raw text on every parse failure, not just an
+                        # empty-response special case - a "Expecting value: line 1
+                        # column 1" error looks identical whether the content was
+                        # genuinely empty, whitespace, or (as seen in practice) wrapped
+                        # in a markdown fence that didn't match the stripping pattern.
+                        # response_metadata carries stop_reason (e.g. "max_tokens" vs
+                        # "end_turn"), useful if this turns out to be a truncation issue.
+                        logger.warning(
+                            f"Invalid JSON response, retrying (attempt {attempt + 1}): {e}. "
+                            f"raw content (first 500 chars): {response_text[:500]!r} "
+                            f"response_metadata={getattr(response, 'response_metadata', None)!r}"
+                        )
                         if attempt < max_retries:
-                            logger.warning(f"Invalid JSON response, retrying (attempt {attempt + 1}): {e}")
                             continue
                         else:
                             raise ValueError(f"Failed to get valid JSON after {max_retries} retries: {e}")
-                
+                    response_text = parsed_text
+
                 response_time = time.time() - start_time
-                
+
                 return LLMResponse(
-                    content=response.content,
+                    content=response_text,
                     model=self.config.model,
                     tokens_used=tokens_used,
                     cost_estimate=cost,
@@ -133,6 +259,20 @@ class LLMProvider:
                 )
                 
             except Exception as e:
+                # This is a deterministic rejection of a request parameter, not a
+                # transient failure - retrying the identical request would just
+                # fail the same way every time. Rebuild the client without
+                # temperature and retry immediately, without consuming the
+                # normal exponential-backoff budget below.
+                if not self._omit_temperature and _rejects_temperature(e):
+                    logger.warning(
+                        f"Model {self.config.model} rejected the 'temperature' parameter - "
+                        f"retrying without it: {e}"
+                    )
+                    self._omit_temperature = True
+                    self.llm = self._initialize_llm()
+                    continue
+
                 if attempt < max_retries:
                     wait_time = 2 ** attempt  # Exponential backoff
                     logger.warning(f"LLM call failed, retrying in {wait_time}s (attempt {attempt + 1}): {e}")
@@ -219,6 +359,14 @@ class LLMProvider:
 class ModelRegistry:
     """Registry of supported models with metadata."""
     
+    # supports_temperature: whether this model accepts the `temperature`
+    # request param at all (some reasoning-first models reject it outright,
+    # e.g. Anthropic's 400 "`temperature` is deprecated for this model" - see
+    # _rejects_temperature() below). Missing/uncatalogued models default to
+    # True via supports_temperature() - _rejects_temperature()'s reactive
+    # fallback in generate() remains the safety net for anything not listed
+    # here, so a new/unrecognized model still self-heals after one failed
+    # call instead of needing a registry update to work at all.
     MODELS = {
         "gpt-4-1106-preview": {
             "provider": "openai",
@@ -227,6 +375,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.03,
             "supports_json": True,
             "supports_seed": True,
+            "supports_temperature": True,
         },
         "gpt-4": {
             "provider": "openai",
@@ -235,6 +384,7 @@ class ModelRegistry:
             "output_cost_per_1k": 0.06,
             "supports_json": False,
             "supports_seed": False,
+            "supports_temperature": True,
         },
         "gpt-3.5-turbo": {
             "provider": "openai",
@@ -243,9 +393,43 @@ class ModelRegistry:
             "output_cost_per_1k": 0.002,
             "supports_json": True,
             "supports_seed": False,
+            "supports_temperature": True,
+        },
+        "claude-opus-5": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.015,
+            "output_cost_per_1k": 0.075,
+            "supports_json": False,
+            "supports_seed": False,
+            "supports_temperature": False,
+        },
+        "claude-sonnet-5": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.003,
+            "output_cost_per_1k": 0.015,
+            "supports_json": False,
+            "supports_seed": False,
+            "supports_temperature": False,
+        },
+        "claude-haiku-4-5-20251001": {
+            "provider": "anthropic",
+            "context_length": 200000,
+            "input_cost_per_1k": 0.001,
+            "output_cost_per_1k": 0.005,
+            "supports_json": False,
+            "supports_seed": False,
+            "supports_temperature": False,
         },
     }
-    
+
+    @classmethod
+    def supports_temperature(cls, model_name: str) -> bool:
+        """Whether `model_name` accepts the `temperature` param. Defaults to
+        True for any model not in MODELS - see the class-level comment above."""
+        return cls.MODELS.get(model_name, {}).get("supports_temperature", True)
+
     @classmethod
     def get_model_info(cls, model_name: str) -> Dict[str, Any]:
         """Get information about a model."""

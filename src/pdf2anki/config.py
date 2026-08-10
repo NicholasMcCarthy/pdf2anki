@@ -76,10 +76,15 @@ def _dataclass_from_dict(dc_type, data: Dict[str, Any]):
         if is_dataclass(field_type) and isinstance(raw, dict):
             kwargs[key] = _dataclass_from_dict(field_type, raw)
 
+        elif field_type is Path:
+            kwargs[key] = Path(raw) if isinstance(raw, str) else raw
+
         elif origin is Union and len(args) == 2 and type(None) in args:
             inner = args[0] if args[1] is type(None) else args[1]
             if is_dataclass(inner) and isinstance(raw, dict):
                 kwargs[key] = _dataclass_from_dict(inner, raw)
+            elif inner is Path:
+                kwargs[key] = Path(raw) if isinstance(raw, str) else raw
             else:
                 kwargs[key] = raw
 
@@ -148,7 +153,7 @@ class Inputs:
 
 @dataclass
 class Chunking:
-    mode: str = "smart"                 # pages|sections|paragraphs|smart|figures|highlights|entire
+    mode: str = "smart"                 # pages|sections|paragraphs|smart|figures|highlights|entire|outline
     tokens_per_chunk: int = 2000
     overlap_tokens: int = 200
     respect_page_bounds: bool = True
@@ -156,6 +161,7 @@ class Chunking:
     max_chunk_tokens: int = 4000
     enable_trimming: bool = True        # entire-mode helpers
     token_budget: int = 8000
+    single_call_max_pages: int = 12     # highlights-mode: papers this short or shorter go in one LLM call, not chunked
 
 
 @dataclass
@@ -164,6 +170,7 @@ class Ingestion:
     chunking: Chunking = field(default_factory=Chunking)
     extract_images: bool = True
     extract_tables: bool = False
+    extract_annotations: bool = False
     ocr_fallback: bool = False
 
 
@@ -211,24 +218,31 @@ class Strategies:
         enabled=True
     ))
     figure_based: Strategy = field(default_factory=lambda: Strategy(
-        name="figure_based", 
-        prompt="figure_based", 
-        note="image_occlusion", 
+        name="figure_based",
+        prompt="figure_based",
+        note="image_occlusion",
         enabled=True
     ))
-    
+    highlight_priority: Strategy = field(default_factory=lambda: Strategy(
+        name="highlight_priority",
+        prompt="highlight_priority",
+        note="basic",
+        enabled=False  # opt-in: only meaningful when ingestion.extract_annotations is on
+    ))
+
     def items(self):
         """Support for dict-like .items() iteration."""
         return [
             ('key_points', self.key_points),
-            ('cloze_definitions', self.cloze_definitions),  
-            ('figure_based', self.figure_based)
+            ('cloze_definitions', self.cloze_definitions),
+            ('figure_based', self.figure_based),
+            ('highlight_priority', self.highlight_priority),
         ]
-    
+
     def keys(self):
         """Support for dict-like .keys() iteration."""
-        return ['key_points', 'cloze_definitions', 'figure_based']
-    
+        return ['key_points', 'cloze_definitions', 'figure_based', 'highlight_priority']
+
     def __getitem__(self, key):
         """Support for dict-like access."""
         if key == 'key_points':
@@ -237,29 +251,34 @@ class Strategies:
             return self.cloze_definitions
         elif key == 'figure_based':
             return self.figure_based
+        elif key == 'highlight_priority':
+            return self.highlight_priority
         else:
             raise KeyError(key)
-    
+
     def __deepcopy__(self, memo):
         """Custom deepcopy to avoid __dict__ issues."""
         return Strategies(
             key_points=copy.deepcopy(self.key_points, memo),
             cloze_definitions=copy.deepcopy(self.cloze_definitions, memo),
-            figure_based=copy.deepcopy(self.figure_based, memo)
+            figure_based=copy.deepcopy(self.figure_based, memo),
+            highlight_priority=copy.deepcopy(self.highlight_priority, memo),
         )
-    
+
     def __getattribute__(self, name):
         if name == '__dict__':
-            # Return a dict-like view for legacy compatibility  
+            # Return a dict-like view for legacy compatibility
             # Use object.__getattribute__ to avoid recursion
             try:
                 key_points = object.__getattribute__(self, 'key_points')
                 cloze_definitions = object.__getattribute__(self, 'cloze_definitions')
                 figure_based = object.__getattribute__(self, 'figure_based')
+                highlight_priority = object.__getattribute__(self, 'highlight_priority')
                 return {
                     'key_points': key_points,
-                    'cloze_definitions': cloze_definitions,  
-                    'figure_based': figure_based
+                    'cloze_definitions': cloze_definitions,
+                    'figure_based': figure_based,
+                    'highlight_priority': highlight_priority,
                 }
             except AttributeError:
                 # Fallback to regular __dict__ during object construction
@@ -327,7 +346,12 @@ class Ids:
 class Anki:
     deck_name: str = "PDF2Anki"
     deck_id: Optional[int] = None
-    deck_structure: str = "flat"     # flat|by_chapter|by_theme|predefined
+    # workflow|flat|chapter|theme - "workflow" (the default) puts cards from
+    # each workflow into their own subdeck under deck_name (e.g.
+    # "PDF2Anki::Readwise", "PDF2Anki::Textbooks::SomeBook",
+    # "PDF2Anki::Articles") - see workflow_router.deck_subdeck_for_workflow()
+    # and build.py::AnkiDeckBuilder._create_decks().
+    deck_structure: str = "workflow"
     note_types: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     preserve_latex: bool = True
 
@@ -348,6 +372,61 @@ class Telemetry:
     track_costs: bool = True
     track_timing: bool = True
     track_cache_hits: bool = True
+
+
+@dataclass
+class WatchDirs:
+    """Directories the watcher service polls for new input files."""
+    pdfs: Optional[str] = "/data/pdfs"
+    textbooks: Optional[str] = "/data/textbooks"
+    readwise: Optional[str] = "/data/readwise"
+
+
+@dataclass
+class AnkiConnectSettings:
+    """AnkiConnect is the only realistic way to push new cards into AnkiWeb
+    automatically - AnkiWeb has no public upload API. Requires a real Anki
+    desktop instance (with the AnkiConnect add-on) reachable at `url`,
+    already logged into AnkiWeb. Failures here are always non-fatal: the
+    service still writes the local .apkg regardless of whether AnkiConnect
+    is reachable."""
+    enabled: bool = False
+    url: str = "http://host.docker.internal:8765"
+    sync_after_update: bool = True
+    timeout: int = 30
+
+
+@dataclass
+class NotificationSettings:
+    slack_webhook_url: Optional[str] = None  # supports ${ENV_VAR}
+    notify_on_processed: bool = True
+    notify_on_error: bool = True
+
+    def resolve_env(self) -> None:
+        self.slack_webhook_url = _resolve_env_value(self.slack_webhook_url)
+
+
+@dataclass
+class Service:
+    """Config for the `pdf2anki serve` watcher service (see src/pdf2anki/service/)."""
+    watch_dirs: WatchDirs = field(default_factory=WatchDirs)
+    poll_interval_seconds: int = 300  # periodic reconciliation fallback
+    debounce_seconds: float = 5.0
+    # Persists which files have already been processed - and which errored,
+    # with why - across restarts/rebuilds, so the startup reconciliation scan
+    # doesn't re-run the full (LLM-calling) pipeline on files it already
+    # handled, and doesn't keep re-attempting (and re-spending API credits
+    # on) files that already failed. Only genuinely new or modified (e.g.
+    # explicitly `touch`ed) files get (re)processed. See
+    # service/watcher.py::WatcherState - `pdf2anki watch-status` inspects
+    # this file; `pdf2anki serve --retry-errors`/`--reset-state` clear it.
+    # Defaults to a file inside Output.workspace (already a persistent
+    # volume in the Docker deployment) - see cli.py's `serve` command. Set
+    # to null/empty to disable persistence (in-memory only, the old
+    # behavior - every restart reprocesses everything found).
+    state_path: Optional[str] = None
+    ankiconnect: AnkiConnectSettings = field(default_factory=AnkiConnectSettings)
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
 
 
 @dataclass
@@ -379,6 +458,7 @@ class Config:
     inputs: Inputs = field(default_factory=Inputs)
     pipeline: Pipeline = field(default_factory=Pipeline)
     generate: Generate = field(default_factory=Generate)
+    service: Service = field(default_factory=Service)
 
     # ---------- I/O ----------
     @classmethod
@@ -386,6 +466,7 @@ class Config:
         if not Path(path).exists():
             cfg = cls()
             cfg.pipeline.llm.resolve_env()
+            cfg.service.notifications.resolve_env()
             return cfg
 
         with open(path, "r", encoding="utf-8") as f:
@@ -433,6 +514,7 @@ class Config:
 
         # Resolve ${ENV} just-in-time
         cfg.pipeline.llm.resolve_env()
+        cfg.service.notifications.resolve_env()
         return cfg
 
     def to_yaml(self, path: Union[str, Path]) -> None:
@@ -459,6 +541,8 @@ class Config:
     def hallucination(self) -> Hallucination: return self.pipeline.hallucination
     @property
     def review(self) -> Review: return self.pipeline.review
+    @property
+    def telemetry(self) -> Telemetry: return self.pipeline.telemetry
     @property
     def tags(self) -> Tags: return self.generate.tags
     @property
@@ -502,11 +586,19 @@ class DocumentConfig:
     # Heuristic suggestions (from scan)
     heuristic_chunking: Optional[Chunking] = None
     heuristic_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
+    heuristic_extract_annotations: Optional[bool] = None
 
     # Explicit overrides (user-defined)
     override_chunking: Optional[Chunking] = None
     override_strategies: Optional[List[Union[str, Dict[str, Any]]]] = None
     override_ingestion: Optional[Ingestion] = None
+    override_extract_annotations: Optional[bool] = None
+
+    # Resolved/overridden workflow (textbook|academic_paper|readwise|generic).
+    # Set by the user to force classification of a specific document; scan-docs
+    # also writes back its resolved value (auto-detected or override-honoring)
+    # here for visibility - see workflow_router.select_workflow().
+    workflow: Optional[str] = None
 
     # Processing flags
     enabled: bool = True
@@ -571,12 +663,25 @@ class Documents:
                 _as_plain(doc.override_ingestion)
             )
 
+        # extract_annotations is applied as a single explicit flag rather than
+        # via override_ingestion, since override_ingestion's whole-object merge
+        # would otherwise clobber heuristic_chunking with Ingestion()'s defaults.
+        if doc.heuristic_extract_annotations is not None:
+            eff.pipeline.ingestion.extract_annotations = doc.heuristic_extract_annotations
+        if doc.override_extract_annotations is not None:
+            eff.pipeline.ingestion.extract_annotations = doc.override_extract_annotations
+
         # ---- Strategies ----
         # Convert Strategies object to list for processing, then back to object
         def strategies_to_list(strategies: Strategies) -> List[Strategy]:
             """Convert Strategies dataclass to list for processing."""
-            return [strategies.key_points, strategies.cloze_definitions, strategies.figure_based]
-        
+            return [
+                strategies.key_points,
+                strategies.cloze_definitions,
+                strategies.figure_based,
+                strategies.highlight_priority,
+            ]
+
         def list_to_strategies(strategy_list: List[Strategy]) -> Strategies:
             """Convert list back to Strategies dataclass."""
             result = Strategies()
@@ -587,6 +692,8 @@ class Documents:
                     result.cloze_definitions = strategy
                 elif strategy.name == "figure_based":
                     result.figure_based = strategy
+                elif strategy.name == "highlight_priority":
+                    result.highlight_priority = strategy
             return result
         
         base_list = strategies_to_list(eff.generate.strategies)
@@ -667,6 +774,7 @@ class ChunkingMode:
     FIGURES = "figures"
     HIGHLIGHTS = "highlights"
     ENTIRE = "entire"
+    OUTLINE = "outline"
 
 # --------------------------- usage example ---------------------------
 # cfg = Config.from_yaml("config.yaml")

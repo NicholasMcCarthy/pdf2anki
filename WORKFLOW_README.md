@@ -173,8 +173,9 @@ The system supports multiple chunking strategies:
 - `sections`: Chunk by detected sections/headings
 - `paragraphs`: Chunk by paragraph breaks
 - `smart`: Intelligent chunking (default)
-- `figures`: Chunk based on figures (TODO)
-- `highlights`: Chunk based on highlights/annotations (TODO)
+- `figures`: Chunk based on figures (TODO - falls back to smart chunking)
+- `highlights`: Chunk based on highlight/underline/squiggly annotations, one chunk per page with highlights, screenshotting each highlighted region - falls back to smart chunking when a PDF has no annotations (see `src/pdf2anki/pdf.py:PDFDocument.extract_annotations/render_region`, `chunking.py:_chunk_by_highlights`)
+- `outline`: Chunk chapter/section-bounded off a PDF's own TOC/bookmarks (falling back to heading detection when there's none) - the basis for the textbook full-coverage workflow (see `src/pdf2anki/textbook.py`, `chunking.py:_chunk_by_outline`)
 
 ## Heuristics
 
@@ -186,9 +187,11 @@ The `scan-docs` command applies heuristics to determine optimal settings:
 - **Unknown**: Fallback for unclassified documents
 
 ### Configuration Defaults
-- **Research Papers**: Smaller chunks (1500 tokens), section-based chunking
-- **Textbooks**: Larger chunks (2500 tokens), smart chunking, figure-based strategies
+- **Research Papers**: Smaller chunks (1500 tokens), highlights chunking (highlight-priority strategy first, falling back to smart chunking when unannotated), plus key_points/cloze_definitions for the rest
+- **Textbooks**: Larger chunks (2500 tokens), outline-driven chunking for full coverage, key_points/figure_based/cloze_definitions strategies
 - **Large Documents**: Increased chunk sizes automatically
+
+A document's resolved workflow (`textbook`/`academic_paper`/`readwise`/`generic`) can be forced by hand-editing `documents.yaml`'s `workflow:` field for that document and re-running `scan-docs` - see `src/pdf2anki/workflow_router.py`. Heuristic suggestions are only written for confidently-classified documents (not `unknown`), since `get_effective_config()` lets `heuristic_*` fields override the user's own config.yaml.
 
 ## CSV Output Schema
 
@@ -218,15 +221,19 @@ registry.register_strategy("custom_strategy", custom_factory_function)
 
 ## TODO Items
 
-The following features are stubbed and need implementation:
+Implemented since this doc was first written: real LLM calls (OpenAI + Anthropic,
+`src/pdf2anki/llm.py`), the `generate` CLI command actually wired to the real
+pipeline (`preprocess.py`) instead of a stub, `get_effective_config()` layering,
+highlights-based chunking, outline-based chunking, and LLM response caching
+(SQLite-backed, via LangChain).
 
-1. **LLM Integration**: Replace mock responses with actual LLM calls
-2. **Configuration Layering**: Complete the `get_effective_config` logic
-3. **Figure Chunking**: Implement figure-based chunking mode
-4. **Highlights Chunking**: Implement highlights-based chunking mode
-5. **Token Truncation**: Implement proper token-aware text truncation
-6. **Cache Integration**: Add caching for LLM responses
-7. **Error Handling**: Add comprehensive error handling and recovery
+Remaining:
+
+1. **Figure Chunking**: `figures` chunking mode still falls back to smart chunking
+2. **Token Truncation**: Token-aware text truncation for oversized chunks
+3. **Error Handling**: Broader error handling/recovery across the pipeline
+4. **OCR Fallback**: `ingestion.ocr_fallback` is accepted but not implemented (`pdf.py:extract_pdf_content`)
+5. **Two-column layout detection**: `DocumentAnalyzer._detect_two_column_layout` is a stub that always returns `False`
 
 ## Migration from Old Workflow
 

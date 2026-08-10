@@ -2,16 +2,60 @@
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..chunking import TextChunk
 from ..config import StrategyConfig
 from ..llm import LLMProvider
+from ..note_types import get_note_type_fields
 from ..prompts import PromptManager
 
 logger = logging.getLogger(__name__)
+
+_CLOZE_PATTERN = re.compile(r"\{\{c\d+::[^}]+\}\}")
+
+
+def validate_cloze_format(cloze_text: Any, max_deletions: int = 3) -> bool:
+    """Validate that cloze_text contains 1-max_deletions well-formed
+    {{cN::...}} deletion markers. Shared by every strategy that can emit
+    Cloze cards (ClozeDefinitionsStrategy, and any strategy that lets the LLM
+    choose per-card between Basic and Cloze - see infer_card_type())."""
+    if not isinstance(cloze_text, str):
+        return False
+    matches = _CLOZE_PATTERN.findall(cloze_text)
+    if not matches:
+        return False
+    if len(matches) > max_deletions:
+        logger.warning(f"Too many cloze deletions ({len(matches)}) in: {cloze_text[:100]}...")
+        return False
+    return True
+
+
+def infer_card_type(card_data: Dict[str, Any]) -> str:
+    """Determine whether a card dict from an LLM response represents a Basic
+    or Cloze note. Prefers an explicit "card_type" field (used by strategies
+    that let the LLM choose per card, e.g. highlight_priority and
+    readwise_highlight), falling back to field-presence inference if it's
+    missing or invalid."""
+    declared = str(card_data.get("card_type", "")).strip().lower()
+    if declared in ("basic", "cloze"):
+        return declared
+    return "cloze" if card_data.get("cloze_text") else "basic"
+
+
+def default_page_citation(chunk: "TextChunk") -> str:
+    """"p. N" for a single-page chunk, "pp. N-M" for one spanning multiple
+    pages - the efficiency-focused academic-paper chunking (whole-paper
+    single-call for short papers, page-range smart-chunks for long ones - see
+    chunking.py:_chunk_by_highlights) means a chunk is no longer reliably one
+    page, so a bare "p. {start_page}" fallback would misreport the source for
+    any card whose highlight came from elsewhere in a multi-page chunk."""
+    if chunk.start_page == chunk.end_page:
+        return f"p. {chunk.start_page}"
+    return f"pp. {chunk.start_page}-{chunk.end_page}"
 
 
 @dataclass
@@ -31,9 +75,11 @@ class FlashcardData:
     back: Optional[str] = None
     cloze_text: Optional[str] = None
     extra: Optional[str] = None
-    
+
     # Metadata fields
-    source_pdf: str = ""
+    source_pdf: str = ""  # file path (.pdf/.md) - shown as the filename on the card
+    source_title: str = ""  # detected document title (PDF metadata title, Readwise article title, etc.)
+    deck: str = ""  # fully-resolved Anki deck name (e.g. "PDF2Anki::Articles") - see workflow_router.deck_subdeck_for_workflow()
     page_start: int = 0
     page_end: int = 0
     section: Optional[str] = None
@@ -43,21 +89,7 @@ class FlashcardData:
     strategy: str = ""
     template_version: str = "1.0"
     original_text: Optional[str] = None
-    back: Optional[str] = None
-    cloze_text: Optional[str] = None
-    extra: Optional[str] = None
-    
-    # Metadata fields
-    source_pdf: str = ""
-    page_start: int = 0
-    page_end: int = 0
-    section: Optional[str] = None
-    ref_citation: str = ""
-    llm_model: str = ""
-    llm_version: str = ""
-    strategy: str = ""
-    template_version: str = "1.0"
-    original_text: Optional[str] = None
+    media: List[str] = field(default_factory=list)  # e.g. highlight/figure screenshot filenames
     metadata: Dict[str, Any] = field(default_factory=dict)  # Added for reviewer functionality
     
     def __post_init__(self):
@@ -129,8 +161,17 @@ class BaseStrategy(ABC):
                 "page_end": chunk.end_page,
                 "pdf_title": pdf_metadata.get("title", "Unknown"),
                 "author": pdf_metadata.get("author", ""),
+                "abstract": pdf_metadata.get("abstract", ""),
+                "highlight_count": pdf_metadata.get("highlight_count"),
                 "strategy": self.name,
                 "max_cards": max_cards,
+                # Per-field LLM instructions from notes/basic.yaml and
+                # notes/cloze.yaml - see note_types.get_note_type_fields().
+                # Every strategy gets both regardless of which card types it
+                # actually emits; a template that doesn't reference one just
+                # ignores it.
+                "basic_fields": get_note_type_fields("basic"),
+                "cloze_fields": get_note_type_fields("cloze"),
                 **self.config.params
             }
             
@@ -170,10 +211,15 @@ class BaseStrategy(ABC):
             # Add common metadata
             for card in cards:
                 card.source_pdf = str(pdf_metadata.get("path", ""))
+                card.source_title = card.source_title or str(pdf_metadata.get("title", ""))
+                card.deck = card.deck or str(pdf_metadata.get("deck", ""))
                 card.page_start = chunk.start_page
                 card.page_end = chunk.end_page
                 card.section = chunk.section
-                card.ref_citation = f"p. {chunk.start_page}"
+                # Page-based citation is the sensible default for PDF-derived chunks;
+                # a strategy may pre-set ref_citation in parse_cards() instead (e.g.
+                # ReadwiseHighlightStrategy citing a source URL), which wins here.
+                card.ref_citation = card.ref_citation or default_page_citation(chunk)
                 card.llm_model = self.llm_provider.config.model
                 card.strategy = self.name
                 card.template_version = self.config.template_version
@@ -218,7 +264,7 @@ class BaseStrategy(ABC):
                 import re
                 key = re.sub(r'\{\{c\d+::(.*?)\}\}', r'\1', card.cloze_text).lower().strip()
             else:
-                key = str(card.dict())
+                key = str(asdict(card))
             
             if key not in seen_fronts:
                 seen_fronts.add(key)

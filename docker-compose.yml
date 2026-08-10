@@ -1,0 +1,116 @@
+# Runs the pdf2anki watcher service: watches mounted directories for new
+# PDFs/textbooks/Readwise markdown exports, classifies and processes each
+# one, and keeps a running Anki deck (.apkg) up to date - see
+# src/pdf2anki/service/ and `pdf2anki serve --help`.
+#
+# Quick start:
+#   cp .env.example .env            # fill in API keys / webhook / paths
+#   cp examples/service_config.example.yaml config.yml   # adjust as needed
+#   docker compose up -d
+#   open http://localhost:3000      # one-time: log the bundled Anki into AnkiWeb (see below)
+#
+# AnkiWeb sync: AnkiWeb has no public upload API, so pushing new cards there
+# automatically requires a real, running Anki instance (with the AnkiConnect
+# add-on) already logged into AnkiWeb. The `anki` service below bundles one
+# (mlcivilengineer/anki-desktop-docker, a noVNC-accessible headless Anki with
+# AnkiConnect pre-installed - https://github.com/mlcivilengineer/anki-desktop-docker)
+# so you don't need a separate machine running Anki desktop.
+#
+# One-time setup after `docker compose up -d`:
+#   1. Open http://localhost:3000 in a browser - this is the Anki GUI, running
+#      in the container, via noVNC.
+#   2. Tools > Add-ons > AnkiConnect > Config - confirm:
+#        {"webBindAddress": "0.0.0.0", "webBindPort": 8765, "webCorsOriginList": ["*"]}
+#      (needed so the pdf2anki container, not just localhost inside the anki
+#      container, can reach it). Restart Anki (in the GUI) if you change it.
+#   3. If you want cards synced to AnkiWeb: File > Switch Profile > Sync, log
+#      into your AnkiWeb account. Leave the window open/idle - the container
+#      keeps running headlessly.
+#   4. In config.yml, set service.ankiconnect.enabled: true (url is already
+#      set to http://anki:8765, the compose service's internal DNS name).
+#
+# Without that setup, pdf2anki still writes/updates workspace/deck.apkg
+# locally - import it into any Anki install by hand. Prefer pointing at a
+# desktop Anki you already run elsewhere instead of the bundled container?
+# Delete the `anki` service below and point service.ankiconnect.url at
+# http://host.docker.internal:8765 - the `extra_hosts` entry on `pdf2anki`
+# makes the host reachable under that name for exactly that case.
+#
+# Known caveat (upstream): the bundled Anki image can leak memory on very
+# constrained hosts (<1GB RAM) and become unresponsive after ~1 day; the
+# healthcheck below restarts the container automatically if AnkiConnect stops
+# responding.
+#
+# Multiple decks: to run more than one instance (e.g. separate decks per
+# subject), duplicate the pdf2anki service block below with a different name,
+# container_name, config.yml, workspace volume, and watch directories - see
+# the commented `pdf2anki-second-deck` example at the bottom. They can share
+# the one `anki` service (different deck names keep cards separated) or you
+# can run a second `anki` instance on different ports for a fully separate
+# Anki profile/collection.
+
+services:
+  anki:
+    image: mlcivilengineer/anki-desktop-docker:main
+    container_name: anki
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ${ANKI_DATA_DIR:-./data/anki}:/config
+    ports:
+      - "3900:3000"   # noVNC browser access to the Anki GUI (one-time setup, see above)
+      - "8765:8765"   # AnkiConnect API
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  pdf2anki:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf2anki
+    restart: unless-stopped
+    command: ["serve", "--config", "/home/pdf2anki/config.yml"]
+    depends_on:
+      anki:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./config.yml:/home/pdf2anki/config.yml:ro
+      - ${PDF_SYNC_DIR:-./data/pdfs}:/data/pdfs
+      - ${TEXTBOOK_SYNC_DIR:-./data/textbooks}:/data/textbooks
+      - ${READWISE_SYNC_DIR:-./data/readwise}:/data/readwise
+      - ${WORKSPACE_DIR:-./data/workspace}:/home/pdf2anki/workspace
+      - ${TEXTBOOK_CONFIGS_DIR:-./data/textbook-configs}:/data/textbook-configs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Example second instance, e.g. a separate deck for a different subject.
+  # Uncomment and adjust config.yml/volumes/deck name to run it alongside the
+  # primary service.
+  # pdf2anki-second-deck:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: pdf2anki-second-deck
+  #   restart: unless-stopped
+  #   command: ["serve", "--config", "/home/pdf2anki/config.yml"]
+  #   depends_on:
+  #     anki:
+  #       condition: service_healthy
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./config-second-deck.yml:/home/pdf2anki/config.yml:ro
+  #     - ${PDF_SYNC_DIR_2:-./data/pdfs-2}:/data/pdfs
+  #     - ${TEXTBOOK_SYNC_DIR_2:-./data/textbooks-2}:/data/textbooks
+  #     - ${READWISE_SYNC_DIR_2:-./data/readwise-2}:/data/readwise
+  #     - ${WORKSPACE_DIR_2:-./data/workspace-2}:/home/pdf2anki/workspace
+  #   extra_hosts:
+  #     - "host.docker.internal:host-gateway"

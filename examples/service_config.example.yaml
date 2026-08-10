@@ -1,0 +1,76 @@
+# Example config.yml for the `pdf2anki serve` watcher service (docker-compose.yml).
+# Copy to config.yml at the repo root (or wherever docker-compose.yml's
+# ./config.yml mount points) and adjust.
+
+project:
+  name: my-pdf2anki-deck
+
+pipeline:
+  llm:
+    provider: openai              # or "anthropic"
+    model: gpt-4-1106-preview     # or e.g. claude-sonnet-5 for anthropic
+    # ${VAR} is resolved from the container's environment (see .env.example).
+    # Point this at whichever provider-specific var you set, or use the
+    # generic ${API_KEY} if you'd rather manage one secret regardless of provider.
+    api_key: ${OPENAI_API_KEY}
+  hallucination:
+    require_citations: true
+    verify_quotes: true
+
+generate:
+  anki:
+    deck_name: My PDF2Anki Deck
+    deck_structure: workflow      # workflow|flat|chapter|theme - "workflow" nests each
+                                   # source (Readwise/Articles/Textbooks::BookName) in
+                                   # its own subdeck under deck_name
+  output:
+    workspace: /home/pdf2anki/workspace
+    csv_path: /home/pdf2anki/workspace/cards.csv
+    media_path: /home/pdf2anki/workspace/media
+    apkg_path: /home/pdf2anki/workspace/deck.apkg
+    manifest_path: /home/pdf2anki/workspace/manifest.json
+
+# Watcher-service-specific settings (src/pdf2anki/config.py:Service).
+service:
+  watch_dirs:
+    pdfs: /data/pdfs
+    textbooks: /data/textbooks
+    readwise: /data/readwise
+  poll_interval_seconds: 300      # periodic full reconciliation scan fallback
+  debounce_seconds: 5.0           # wait for a file to stop changing before processing
+
+  # Persists which files have already been processed - and which errored -
+  # so restarting/rebuilding the container doesn't reprocess every file the
+  # startup reconciliation scan finds, and doesn't keep retrying (and
+  # spending API credits on) files that already failed. Only genuinely new
+  # or modified (e.g. explicitly `touch`ed) files run through the
+  # (LLM-calling) pipeline again. Defaults to <output.workspace>/watcher_state.json
+  # (already a persistent volume below via the compose ./workspace mount),
+  # so you normally don't need to set this.
+  #   pdf2anki watch-status --config config.yml            # see what errored, and why
+  #   pdf2anki watch-status --config config.yml --retry-errors [--path FILE]
+  #                                                          # retry just the errored ones
+  #   pdf2anki serve --config config.yml --retry-errors     # same, retried on startup
+  #   pdf2anki serve --config config.yml --reset-state       # forget everything, full reprocess
+  # state_path: /home/pdf2anki/workspace/watcher_state.json
+
+  # AnkiWeb has no public upload API - AnkiConnect (talking to a real, running
+  # Anki instance already logged into AnkiWeb) is the only realistic way to
+  # push new cards there automatically. docker-compose.yml bundles a headless
+  # Anki + AnkiConnect container (service name "anki", noVNC GUI on
+  # http://localhost:3000) - url below points at it by its compose service
+  # name. See docker-compose.yml's header comment for the one-time setup
+  # (AnkiWeb login, AnkiConnect bind address) before flipping enabled to true.
+  # Point at your own already-running desktop Anki instead? Use
+  # http://host.docker.internal:8765 (see docker-compose.yml's `extra_hosts`).
+  # Leave disabled to rely on the local .apkg file only (import it by hand).
+  ankiconnect:
+    enabled: false
+    url: http://anki:8765
+    sync_after_update: true
+
+  notifications:
+    # ${SLACK_WEBHOOK_URL} resolved from the container's environment.
+    slack_webhook_url: ${SLACK_WEBHOOK_URL}
+    notify_on_processed: true
+    notify_on_error: true

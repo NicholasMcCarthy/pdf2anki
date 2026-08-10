@@ -127,6 +127,10 @@ CLI reference
   - Builds .apkg using CSV + media. Honors deck structure, note types, tags, and ID strategy
 - pdf2anki preview --csv cards.csv --n 10
   - Prints sample rows to terminal
+- pdf2anki generate-readwise --path <file-or-dir> --config config.yaml [--max-cards 2]
+  - Generates cards from Readwise/Obsidian markdown highlight exports, merged into the same cards.csv `generate` writes
+- pdf2anki serve --config config.yaml
+  - Runs the watcher service (see "Watcher service (Docker Compose)" below) — watches directories, classifies and processes new files, keeps the deck up to date
 
 --------------------------------------------------------------------------------
 
@@ -284,6 +288,17 @@ Prompt templates live under prompts/ and are Jinja2‑rendered. You can copy and
 
 --------------------------------------------------------------------------------
 
+Workflows: textbooks, academic papers, and Readwise highlights
+
+`pdf2anki scan-docs` classifies each PDF (research_paper / textbook / unknown) via `DocumentAnalyzer` and, for confidently-classified documents, writes heuristic chunking/strategy suggestions into `documents.yaml`. You can force a specific document's classification by hand-editing its `workflow:` field there (`textbook` | `academic_paper` | `readwise` | `generic`) — the next `scan-docs` run honors it. See `src/pdf2anki/workflow_router.py`.
+
+- **Textbook workflow** — full coverage. Chunking follows the PDF's own table of contents/bookmarks (`chunking.mode: outline`, falling back to heading detection when there's no embedded TOC), so every chapter/section gets its own chunk. After generation, a `<pdf-stem>_coverage.json` report in `workspace/` lists which outline sections got zero cards, so gaps are visible rather than silently dropped.
+  - Per-book overrides: place an `instructions.yml` next to a textbook's PDF (e.g. in the Docker service's mounted `textbooks/<book>/` directory) to override chunking granularity, card budget, strategies, deck name, or extra tags for that one book — see `examples/textbook_default.yml` for the full set of fields and `src/pdf2anki/textbook.py:load_textbook_profile()`. No `instructions.yml` at all is the common case; the default template applies.
+- **Academic paper workflow** — highlight/annotation priority. If a PDF has highlight/underline/squiggly annotations, `chunking.mode: highlights` groups them by page, renders a screenshot of each highlighted region (`PDFDocument.render_region()`), and the `highlight_priority` strategy generates cards grounded in the highlighted text with the screenshot attached as card media — falling back to `key_points`/`cloze_definitions` for the rest of the paper's content. Papers with no annotations at all fall back to smart chunking automatically.
+- **Readwise/Obsidian markdown workflow** — `pdf2anki generate-readwise --path <file-or-dir> --config config.yaml` parses Readwise-exported markdown (YAML frontmatter + `## Highlights` callout blocks) and generates one card-generation call per highlight, citing the source URL instead of a page number. Cards are merged into the same `cards.csv` `generate` writes (deduped by id), so PDF- and Readwise-derived cards accumulate into one deck.
+
+--------------------------------------------------------------------------------
+
 Math, tables, and images
 
 - Math: Keep LaTeX inline $...$ or block $$...$$. Anki’s MathJax renders them in templates—no extra setup.
@@ -362,6 +377,37 @@ Run
       pdf2anki:local \
       pdf2anki validate --csv workspace/cards.csv && \
       pdf2anki build --config examples/config.example.yaml
+
+--------------------------------------------------------------------------------
+
+Watcher service (Docker Compose)
+
+`pdf2anki serve --config <path>` runs as a long-lived service: it watches mounted directories for new PDFs/textbooks/Readwise markdown files, classifies each one (`src/pdf2anki/workflow_router.py`), generates cards, merges them into a running `cards.csv`, rebuilds `deck.apkg`, and optionally pushes new notes into a live Anki instance via AnkiConnect. This is the piece the Docker Compose setup runs.
+
+Quick start
+```
+cp .env.example .env                                       # fill in API keys / webhook / mount paths
+cp examples/service_config.example.yaml config.yml          # adjust deck name, provider, watch dirs
+docker compose up -d
+```
+
+What it does
+- Watches three directories (`service.watch_dirs` in config.yml — defaults `/data/pdfs`, `/data/textbooks`, `/data/readwise`), each mapped from a host directory via `docker-compose.yml`'s volumes (`PDF_SYNC_DIR`, `TEXTBOOK_SYNC_DIR`, `READWISE_SYNC_DIR` in `.env`).
+- New files are detected via filesystem events (debounced so a file mid-copy isn't processed early) plus a startup catch-up scan and a periodic full reconciliation pass (`service.poll_interval_seconds`), so events missed on some mounted/network filesystems are still eventually picked up.
+- Each file is classified (research paper → highlight-priority workflow; textbook → outline-driven full coverage, honoring a per-book `instructions.yml` if present in that book's directory; markdown → Readwise workflow), generated, and merged into the shared deck — the `.apkg` is only rebuilt when new cards were actually added.
+- **AnkiWeb sync**: AnkiWeb has no public API for direct `.apkg` upload. The realistic path is AnkiConnect — talking to a real, running Anki instance (with the [AnkiConnect add-on](https://ankiweb.net/shared/info/2055492159)) already logged into AnkiWeb. `docker-compose.yml` bundles one: the `anki` service ([`mlcivilengineer/anki-desktop-docker`](https://github.com/mlcivilengineer/anki-desktop-docker), a headless Anki with AnkiConnect pre-installed, GUI reachable via noVNC at `http://localhost:3000`), so you don't need a separate machine running Anki desktop.
+  - One-time setup after `docker compose up -d`: open `http://localhost:3000`, confirm Tools → Add-ons → AnkiConnect → Config has `webBindAddress: 0.0.0.0` (so the `pdf2anki` container can reach it, not just localhost), and log into AnkiWeb (File → Switch Profile → Sync) if you want cards synced there. Then set `service.ankiconnect.enabled: true` in config.yml — `url` is already `http://anki:8765`, the compose service's internal DNS name. See `docker-compose.yml`'s header comment for the full walkthrough and a known upstream memory-leak caveat on very constrained hosts (mitigated by a healthcheck-triggered restart).
+  - Prefer your own already-running desktop Anki instead of the bundled container? Delete the `anki` service from `docker-compose.yml` and point `service.ankiconnect.url` at `http://host.docker.internal:8765` (the `extra_hosts` entry on `pdf2anki` makes the host reachable under that name).
+  - Leave `ankiconnect.enabled: false` to rely on the local `.apkg` file only, which you import into Anki by hand — this always still happens regardless of the AnkiConnect setting.
+- **Slack notifications**: set `SLACK_WEBHOOK_URL` in `.env` (referenced via `${SLACK_WEBHOOK_URL}` in config.yml) to get a message per file processed (or per error).
+- **Persisted state, so restarts don't reprocess or re-burn API credits**: which files were successfully processed (and which errored) is recorded to `service.state_path` (defaults to `<output.workspace>/watcher_state.json`, already on the persistent workspace volume), keyed by path+mtime. Rebuilding/restarting the container resumes from that state instead of rerunning the LLM pipeline on everything the startup scan finds. Errored files are recorded too, but deliberately **not** auto-retried on later reconciliation passes — a persistent failure (expired API credits, a bad model name, etc.) would otherwise get retried against every matching file on every `poll_interval_seconds` pass, burning time and credits on calls doomed to fail again.
+  - `pdf2anki watch-status --config config.yml` — lists how many files succeeded/errored, with each errored file's path and last error message (add `--processed` to also list successes).
+  - `pdf2anki watch-status --config config.yml --retry-errors [--path <file>]` — clears error state (for one file, or all of them) so the next `serve` run retries them, without touching already-succeeded files. Equivalent to running `pdf2anki serve --retry-errors`, but doesn't require starting the watch loop.
+  - `pdf2anki serve --config config.yml --retry-errors` — same, but retries immediately as part of starting the service.
+  - `pdf2anki serve --config config.yml --reset-state` — forgets *everything* (successes and errors alike), for a full reprocess. Touching a specific file (`touch <file>`) always makes just that one file eligible again too, regardless of its prior status.
+
+Running multiple decks
+- Duplicate the `pdf2anki` service block in `docker-compose.yml` with a different `container_name`, `config.yml`, watch directories, and workspace volume — see the commented `pdf2anki-second-deck` example in that file. Each instance manages its own `cards.csv`/`deck.apkg` independently.
 
 --------------------------------------------------------------------------------
 

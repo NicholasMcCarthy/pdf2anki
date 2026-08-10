@@ -1,0 +1,37 @@
+.git
+.github
+.gitignore
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Project-specific runtime/output artifacts (workspace/, .env, sample data
+# handled by service.watch_dirs mounts, etc.) - never bake these into the
+# image; they're generated at runtime or supplied via volumes.
+workspace/
+*.apkg
+*.csv
+media/
+cache/
+.llm_cache/
+manifest.json
+.env
+documents.yaml
+config.yaml
+config.yml
+
+# Local dev/tooling clutter that has no place in the image
+.vscode/
+.idea/
+*.swp
+tests/
+docs/
+scripts/
+samples/
+.venv/
+venv/

@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List
 
 from ..chunking import TextChunk
-from .base import BaseStrategy, FlashcardData
+from .base import BaseStrategy, FlashcardData, validate_cloze_format
 
 logger = logging.getLogger(__name__)
 
@@ -49,19 +49,7 @@ class ClozeDefinitionsStrategy(BaseStrategy):
     
     def _validate_cloze_format(self, cloze_text: str) -> bool:
         """Validate that cloze text contains proper cloze deletion markers."""
-        # Check for cloze deletion patterns like {{c1::word}} or {{c2::phrase}}
-        cloze_pattern = r'\{\{c\d+::[^}]+\}\}'
-        matches = re.findall(cloze_pattern, cloze_text)
-        
-        if not matches:
-            return False
-        
-        # Check that we don't have too many cloze deletions (max 3 per card)
-        if len(matches) > 3:
-            logger.warning(f"Too many cloze deletions ({len(matches)}) in: {cloze_text[:100]}...")
-            return False
-        
-        return True
+        return validate_cloze_format(cloze_text)
     
     def parse_cards(self, response_data: Dict[str, Any], chunk: TextChunk, pdf_metadata: Dict) -> List[FlashcardData]:
         """Parse LLM response into cloze deletion flashcard data objects."""

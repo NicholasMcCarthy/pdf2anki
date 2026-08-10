@@ -1,22 +1,32 @@
 """Main preprocessing pipeline for converting PDFs to flashcards."""
 
+import json
 import logging
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from .chunking import TextChunker
-from .config import Config
+from .chunking import TextChunk, TextChunker
+from .config import ChunkingMode, Config
 from .dedup import create_deduplication_manager
+from .heuristics import DocumentAnalyzer
 from .ids import create_id_manager
 from .io import find_pdf_files, save_csv, save_images, save_manifest
 from .llm import create_llm_provider
 from .pdf import extract_pdf_content
 from .prompts import create_prompt_manager
 from .rag import create_rag_manager
-from .strategies import ClozeDefinitionsStrategy, FigureBasedStrategy, KeyPointsStrategy
+from .strategies import (
+    ClozeDefinitionsStrategy,
+    FigureBasedStrategy,
+    HighlightPriorityStrategy,
+    KeyPointsStrategy,
+)
 from .strategies.base import FlashcardData
 from .telemetry import create_telemetry_collector
+from .textbook import build_coverage_report, extract_outline
+from .workflow_router import Workflow, deck_subdeck_for_workflow, select_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +56,7 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
     rag_manager = create_rag_manager(config.rag)
     
     # Load existing persistent IDs if using persistent strategy
-    if config.ids.strategy.value == "persistent":
+    if config.ids.strategy == "persistent":
         id_manager.load_persistent_ids(config.output.csv_path)
     
     telemetry.end_phase()
@@ -92,64 +102,95 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
             telemetry.record_error("pdf_processing_error")
             continue
     
+    return finalize_generation(
+        config=config,
+        all_cards=all_cards,
+        all_images=all_images,
+        dedup_manager=dedup_manager,
+        id_manager=id_manager,
+        rag_manager=rag_manager,
+        telemetry=telemetry,
+        source_files=pdf_files,
+    )
+
+
+def finalize_generation(
+    config: Config,
+    all_cards: List[FlashcardData],
+    all_images: List[Dict[str, Any]],
+    dedup_manager,
+    id_manager,
+    rag_manager,
+    telemetry,
+    source_files: List[Path],
+) -> Dict[str, Any]:
+    """Deduplicate, assign IDs, save CSV/media/manifest, and return a run summary.
+
+    Shared by preprocess_pdf() (single global config, glob-discovered PDFs) and any
+    caller that instead drives process_single_pdf() itself per-document with its own
+    effective config (e.g. documents.yaml-driven generation in cli.py), since both
+    need identical finishing steps.
+    """
     telemetry.start_phase("finalization")
-    
+
     # Apply global deduplication
     logger.info(f"Applying global deduplication to {len(all_cards)} cards")
     all_cards = dedup_manager.deduplicate_cards(all_cards)
-    
+
     # Save images
     saved_images = []
     if all_images:
         saved_images = save_images(all_images, config.output.media_path)
-    
+
     # Convert cards to dictionaries for CSV
     cards_data = []
     for card in all_cards:
-        card_dict = card.dict()
-        
+        card_dict = asdict(card)
+
         # Generate ID
         card_dict["id"] = id_manager.generate_id(card)
-        
+
         # Add timestamps
         now = datetime.now().isoformat()
         card_dict["created_at"] = now
         card_dict["updated_at"] = now
-        
-        # Set deck name
-        card_dict["deck"] = config.anki.deck_name
-        
-        # Add media references if relevant
-        card_media = []
-        # TODO: Link images to cards based on page ranges
-        card_dict["media"] = card_media
-        
+
+        # Deck name: generate_cards() already set this per-card from the
+        # document's workflow classification (see process_single_pdf) -
+        # config.anki.deck_name is only a fallback for cards that somehow
+        # didn't get one set (e.g. a strategy path that bypasses the normal
+        # per-document classification step).
+        card_dict["deck"] = card_dict.get("deck") or config.anki.deck_name
+
+        # card_dict["media"] already carries whatever the strategy set on the
+        # FlashcardData (e.g. highlight/figure screenshot filenames) via asdict().
+
         # Add additional metadata
         card_dict["longtext"] = ""  # For future use
         card_dict["my_notes"] = ""  # For user annotations
-        
+
         cards_data.append(card_dict)
-    
+
     # Save CSV
     save_csv(cards_data, config.output.csv_path)
-    
+
     # Update persistent index
     dedup_manager.add_to_persistent_index(all_cards)
     if config.deduplication.index_path:
         dedup_manager.save_persistent_index(Path(config.deduplication.index_path))
-    
+
     # Save RAG index
     if config.rag.index_path:
         rag_manager.save_index(Path(config.rag.index_path))
-    
+
     telemetry.end_phase()
-    
+
     # Create manifest
     manifest_data = {
-        "project": config.project.dict(),
+        "project": asdict(config.project),
         "processing": {
-            "pdf_files": [str(p) for p in pdf_files],
-            "total_pdfs": len(pdf_files),
+            "pdf_files": [str(p) for p in source_files],
+            "total_pdfs": len(source_files),
             "total_cards": len(all_cards),
             "total_images": len(saved_images),
             "strategies_used": list(set(card.strategy for card in all_cards)),
@@ -161,22 +202,22 @@ def preprocess_pdf(config: Config, verbose: bool = False) -> Dict[str, Any]:
         },
         **telemetry.get_manifest_data(config.llm.model)
     }
-    
+
     save_manifest(manifest_data, config.output.manifest_path)
-    
+
     # Log summary
     telemetry.log_summary()
-    
+
     result = {
         "total_cards": len(all_cards),
-        "processed_pdfs": len(pdf_files),
+        "processed_pdfs": len(source_files),
         "csv_path": config.output.csv_path,
         "media_path": config.output.media_path,
         "manifest_path": config.output.manifest_path,
         "images_saved": len(saved_images),
     }
-    
-    logger.info(f"Preprocessing complete: {len(all_cards)} cards generated from {len(pdf_files)} PDFs")
+
+    logger.info(f"Preprocessing complete: {len(all_cards)} cards generated from {len(source_files)} PDFs")
     return result
 
 
@@ -189,9 +230,24 @@ def process_single_pdf(
     id_manager,
     dedup_manager,
     rag_manager,
-    telemetry
+    telemetry,
+    book_name: Optional[str] = None,
+    workflow_override: Optional[str] = None,
 ) -> tuple[List[FlashcardData], List[Dict[str, Any]]]:
-    """Process a single PDF file."""
+    """Process a single PDF file.
+
+    `book_name`: for the TEXTBOOK workflow, the label this book's cards get
+    nested under (config.anki.deck_name::Textbooks::book_name) - e.g. from a
+    per-book instructions.yml's `deck_name` (see service/runner.py's
+    _effective_config_for_pdf). Falls back to the PDF's parent directory
+    name when not given, so this is optional everywhere except the watcher
+    service, which threads a per-book override through.
+
+    `workflow_override`: a manual `workflow:` value from documents.yaml
+    (DocumentConfig.workflow) - takes precedence over auto-classification
+    for the subdeck decision too, matching what it already does for
+    heuristic chunking/strategy defaults (see workflow_router.select_workflow()).
+    """
     
     logger.info(f"Processing PDF: {pdf_path}")
     telemetry.start_phase(f"pdf_extraction_{pdf_path.name}")
@@ -201,12 +257,35 @@ def process_single_pdf(
         pdf_path=pdf_path,
         extract_images=config.ingestion.extract_images,
         extract_structure=True,
+        extract_annotations=config.ingestion.extract_annotations,
         ocr_fallback=config.ingestion.ocr_fallback
     )
     
+    # Outline-driven chunking (textbook workflow) needs the PDF's authoritative
+    # TOC/outline threaded through pdf_content, same as annotations are.
+    outline_entries = None
+    if config.ingestion.chunking.mode == ChunkingMode.OUTLINE:
+        outline_entries = extract_outline(pdf_path)
+        pdf_content["outline"] = [asdict(e) for e in outline_entries]
+
+    # Workflow-based subdeck ("workflow" deck_structure - the default, see
+    # config.py::Anki.deck_structure): classify the document and resolve the
+    # deck every card from it should land in, e.g. "PDF2Anki::Articles" or
+    # "PDF2Anki::Textbooks::SomeBook". Set once here (not per-strategy) so
+    # every card generated below - including the abstract-workflow cards
+    # further down - picks it up automatically via generate_cards()'s
+    # `pdf_metadata.get("deck")` read.
+    doc_metadata = DocumentAnalyzer().analyze_document(str(pdf_path))
+    workflow = select_workflow(pdf_path, metadata=doc_metadata, override=workflow_override)
+    resolved_book_name = book_name or (pdf_path.parent.name if workflow == Workflow.TEXTBOOK else None)
+    deck_suffix = deck_subdeck_for_workflow(workflow, resolved_book_name)
+    pdf_content["metadata"]["deck"] = (
+        f"{config.anki.deck_name}::{deck_suffix}" if deck_suffix else config.anki.deck_name
+    )
+
     telemetry.end_phase()
     telemetry.start_phase(f"chunking_{pdf_path.name}")
-    
+
     # Chunk the text
     chunks = text_chunker.chunk_document(pdf_content)
     logger.info(f"Created {len(chunks)} chunks from {pdf_path}")
@@ -245,10 +324,55 @@ def process_single_pdf(
             strategy_config=config.strategies.figure_based,
             strategy_name="figure_based"
         ))
+
+    if config.strategies.highlight_priority.enabled:
+        strategies.append(HighlightPriorityStrategy(
+            llm_provider=llm_provider,
+            prompt_manager=prompt_manager,
+            strategy_config=config.strategies.highlight_priority,
+            strategy_name="highlight_priority"
+        ))
     
     # Generate cards from chunks
     all_cards = []
-    
+
+    # Abstract workflow: if a real abstract was detected (see
+    # pdf.py::extract_abstract_text), generate cards from it as its own
+    # single chunk using the same "high-level, key message" key_points
+    # prompt/strategy - separate from the main highlight/section-driven
+    # chunk loop below, so the paper's core contribution gets covered even
+    # when nothing in the abstract itself was highlighted by the reader.
+    abstract_text = pdf_content["metadata"].get("abstract")
+    key_points_strategy = next((s for s in strategies if s.name == "key_points"), None)
+    if abstract_text and key_points_strategy:
+        telemetry.start_phase(f"abstract_{pdf_path.name}")
+        abstract_chunk = TextChunk(
+            text=abstract_text,
+            start_page=1,
+            end_page=1,
+            section="Abstract",
+            chunk_index=0,
+            total_chunks=1,
+        )
+        try:
+            abstract_cards = key_points_strategy.generate_cards(
+                chunk=abstract_chunk,
+                pdf_metadata=pdf_content["metadata"],
+                max_cards=key_points_strategy.config.params.get("max_cards", 5)
+            )
+            abstract_cards = key_points_strategy.deduplicate_cards(abstract_cards)
+
+            if config.hallucination.require_citations or config.hallucination.verify_quotes:
+                abstract_cards = apply_hallucination_checks(abstract_cards, abstract_chunk, config.hallucination)
+
+            all_cards.extend(abstract_cards)
+            telemetry.record_cards_generated(len(abstract_cards), "key_points")
+            logger.info(f"Generated {len(abstract_cards)} cards from the abstract of {pdf_path}")
+        except Exception as e:
+            logger.error(f"Abstract card generation failed for {pdf_path}: {e}")
+            telemetry.record_error("strategy_error", "key_points")
+        telemetry.end_phase()
+
     for chunk_idx, chunk in enumerate(chunks):
         telemetry.start_phase(f"generation_chunk_{chunk_idx}")
         telemetry.record_chunk_processed()
@@ -314,7 +438,25 @@ def process_single_pdf(
         telemetry.end_phase()
     
     logger.info(f"Generated {len(all_cards)} cards from {pdf_path}")
-    
+
+    # Full-coverage check for the textbook workflow: report which outline
+    # sections got zero cards rather than letting gaps pass silently.
+    if outline_entries:
+        coverage = build_coverage_report(outline_entries, all_cards)
+        coverage_path = Path(config.output.workspace) / f"{pdf_path.stem}_coverage.json"
+        try:
+            coverage_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(coverage_path, "w", encoding="utf-8") as f:
+                json.dump(coverage, f, indent=2, ensure_ascii=False)
+            logger.info(
+                f"Coverage: {coverage['covered_sections']}/{coverage['total_sections']} sections "
+                f"({coverage['coverage_ratio']:.0%}) - report at {coverage_path}"
+            )
+            if coverage["uncovered_sections"]:
+                logger.warning(f"Sections with no cards: {coverage['uncovered_sections']}")
+        except Exception as e:
+            logger.warning(f"Failed to save coverage report: {e}")
+
     return all_cards, pdf_content.get("images", [])
 
 
@@ -336,7 +478,7 @@ def apply_hallucination_checks(
         # Check citations
         if hallucination_config.require_citations:
             if not card.page_citation or not card.ref_citation:
-                logger.debug(f"Card missing citation: {card.dict()}")
+                logger.debug(f"Card missing citation: {asdict(card)}")
                 is_valid = False
         
         # Verify quotes (basic implementation)

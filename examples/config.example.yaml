@@ -15,7 +15,8 @@ generate:
   anki:
     deck_id: null
     deck_name: PDF2Anki
-    deck_structure: flat
+    deck_structure: workflow  # workflow|flat|chapter|theme - "workflow" puts each source
+                              # (Readwise/Articles/Textbooks::BookName) in its own subdeck
     note_types: {}
     preserve_latex: true
   ids:

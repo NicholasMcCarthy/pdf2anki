@@ -3,11 +3,13 @@
 from .base import BaseStrategy
 from .cloze_definitions import ClozeDefinitionsStrategy
 from .figure_based import FigureBasedStrategy
+from .highlight_priority import HighlightPriorityStrategy
 from .key_points import KeyPointsStrategy
 
 __all__ = [
     "BaseStrategy",
-    "KeyPointsStrategy", 
+    "KeyPointsStrategy",
     "ClozeDefinitionsStrategy",
     "FigureBasedStrategy",
+    "HighlightPriorityStrategy",
 ]

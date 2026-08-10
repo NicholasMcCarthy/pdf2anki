@@ -1,23 +1,54 @@
 """Anki deck building system using genanki."""
 
+import hashlib
 import logging
-import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import genanki
 import pandas as pd
 
-from .config import Config # AnkiConfig, Config, DeckStructure
+from .config import Anki, Config # AnkiConfig, Config, DeckStructure
 from .io import load_csv
+from .note_types import (
+    BASIC_AFMT,
+    BASIC_CSS,
+    BASIC_FIELDS,
+    BASIC_MODEL_NAME,
+    BASIC_QFMT,
+    CLOZE_AFMT,
+    CLOZE_CSS,
+    CLOZE_FIELDS,
+    CLOZE_MODEL_NAME,
+    CLOZE_QFMT,
+    build_image_html,
+    build_source_display,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _stable_id(seed: str) -> int:
+    """Derive a deterministic genanki model/deck ID from a fixed seed string.
+
+    genanki model/deck ids must be stable across runs for repeated
+    build_anki_deck() calls to be reimport-idempotent (the same note type and
+    deck get updated in place rather than duplicated) - which the watcher
+    service depends on, since it rebuilds the whole .apkg after every new
+    file. random.randrange() (the previous approach) produced a fresh id on
+    every AnkiDeckBuilder construction, defeating that.
+    """
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return (int(digest, 16) % ((1 << 31) - (1 << 30))) + (1 << 30)
+
+
 class AnkiDeckBuilder:
     """Builds Anki decks from CSV data using genanki."""
-    
-    def __init__(self, config: Config):
+
+    def __init__(self, config: "Anki"):
+        # Takes the Anki sub-config directly (see build_anki_deck() below,
+        # which always constructs this as AnkiDeckBuilder(config.anki)) - not
+        # the top-level Config, despite the historical type hint.
         self.config = config
         self.note_types = {}
         self.decks = {}
@@ -28,187 +59,36 @@ class AnkiDeckBuilder:
     def _create_default_note_types(self) -> None:
         """Create default Anki note types."""
         
-        # Basic note type
+        # Basic note type - field/template/css definitions live in note_types.py,
+        # shared with the live AnkiConnect push path (service/ankiconnect.py)
+        # so a note pushed live has the exact same shape as one in the .apkg.
         basic_note_type = genanki.Model(
-            model_id=random.randrange(1 << 30, 1 << 31),
-            name='PDF2Anki Basic',
-            fields=[
-                {'name': 'Front'},
-                {'name': 'Back'},
-                {'name': 'Source'},
-                {'name': 'Page'},
-                {'name': 'Section'},
-                {'name': 'Tags'},
-                {'name': 'Extra'},
-            ],
+            model_id=_stable_id("pdf2anki-basic-note-type-v1"),
+            name=BASIC_MODEL_NAME,
+            fields=[{'name': f} for f in BASIC_FIELDS],
             templates=[
                 {
                     'name': 'Card 1',
-                    'qfmt': '''
-                        <div class="question">{{Front}}</div>
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
-                    'afmt': '''
-                        <div class="question">{{Front}}</div>
-                        <hr>
-                        <div class="answer">{{Back}}</div>
-                        {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
+                    'qfmt': BASIC_QFMT,
+                    'afmt': BASIC_AFMT,
                 },
             ],
-            css='''
-                .card {
-                    font-family: Arial, sans-serif;
-                    font-size: 16px;
-                    text-align: left;
-                    color: #333;
-                    background-color: #fff;
-                    padding: 20px;
-                }
-                
-                .question {
-                    font-size: 18px;
-                    font-weight: bold;
-                    margin-bottom: 15px;
-                    color: #2c3e50;
-                }
-                
-                .answer {
-                    font-size: 16px;
-                    line-height: 1.5;
-                    margin-bottom: 15px;
-                }
-                
-                .extra {
-                    font-size: 14px;
-                    color: #666;
-                    font-style: italic;
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background-color: #f8f9fa;
-                    border-left: 3px solid #007bff;
-                }
-                
-                .source {
-                    font-size: 12px;
-                    color: #888;
-                    margin-top: 15px;
-                    padding-top: 10px;
-                    border-top: 1px solid #eee;
-                }
-                
-                .section {
-                    font-size: 12px;
-                    color: #666;
-                    font-style: italic;
-                }
-                
-                /* MathJax support */
-                .MathJax {
-                    font-size: 1.1em !important;
-                }
-                
-                /* Code styling */
-                code {
-                    background-color: #f4f4f4;
-                    padding: 2px 4px;
-                    border-radius: 3px;
-                    font-family: monospace;
-                }
-                
-                pre {
-                    background-color: #f4f4f4;
-                    padding: 10px;
-                    border-radius: 5px;
-                    overflow-x: auto;
-                }
-            '''
+            css=BASIC_CSS,
         )
         
         # Cloze note type
         cloze_note_type = genanki.Model(
-            model_id=random.randrange(1 << 30, 1 << 31),
-            name='PDF2Anki Cloze',
-            fields=[
-                {'name': 'Text'},
-                {'name': 'Extra'},
-                {'name': 'Source'},
-                {'name': 'Page'},
-                {'name': 'Section'},
-                {'name': 'Tags'},
-            ],
+            model_id=_stable_id("pdf2anki-cloze-note-type-v1"),
+            name=CLOZE_MODEL_NAME,
+            fields=[{'name': f} for f in CLOZE_FIELDS],
             templates=[
                 {
                     'name': 'Cloze',
-                    'qfmt': '''
-                        <div class="cloze-question">{{cloze:Text}}</div>
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
-                    'afmt': '''
-                        <div class="cloze-answer">{{cloze:Text}}</div>
-                        {{#Extra}}<div class="extra">{{Extra}}</div>{{/Extra}}
-                        <div class="source">{{Source}} - {{Page}}</div>
-                        {{#Section}}<div class="section">Section: {{Section}}</div>{{/Section}}
-                    ''',
+                    'qfmt': CLOZE_QFMT,
+                    'afmt': CLOZE_AFMT,
                 },
             ],
-            css='''
-                .card {
-                    font-family: Arial, sans-serif;
-                    font-size: 16px;
-                    text-align: left;
-                    color: #333;
-                    background-color: #fff;
-                    padding: 20px;
-                }
-                
-                .cloze-question, .cloze-answer {
-                    font-size: 16px;
-                    line-height: 1.6;
-                    margin-bottom: 15px;
-                }
-                
-                .cloze {
-                    background-color: #007bff;
-                    color: white;
-                    padding: 2px 6px;
-                    border-radius: 3px;
-                    font-weight: bold;
-                }
-                
-                .extra {
-                    font-size: 14px;
-                    color: #666;
-                    font-style: italic;
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background-color: #f8f9fa;
-                    border-left: 3px solid #28a745;
-                }
-                
-                .source {
-                    font-size: 12px;
-                    color: #888;
-                    margin-top: 15px;
-                    padding-top: 10px;
-                    border-top: 1px solid #eee;
-                }
-                
-                .section {
-                    font-size: 12px;
-                    color: #666;
-                    font-style: italic;
-                }
-                
-                /* MathJax support */
-                .MathJax {
-                    font-size: 1.1em !important;
-                }
-            ''',
+            css=CLOZE_CSS,
             model_type=genanki.Model.CLOZE
         )
         
@@ -280,51 +160,73 @@ class AnkiDeckBuilder:
         
         decks = {}
         
-        if self.config.anki.deck_structure == "flat":
+        if self.config.deck_structure == "flat":
             # Single flat deck
-            deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+            deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
             deck = genanki.Deck(deck_id, self.config.deck_name)
             decks['main'] = deck
-            
-        elif self.config.anki.deck_structure == "chapter":
+
+        elif self.config.deck_structure == "chapter":
             # Create subdecks by section/chapter
             sections = df['section'].dropna().unique()
-            
+
             for section in sections:
                 if section and str(section).strip():
                     section_name = str(section).strip()
                     deck_name = f"{self.config.deck_name}::{section_name}"
-                    deck_id = random.randrange(1 << 30, 1 << 31)
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
                     deck = genanki.Deck(deck_id, deck_name)
                     decks[section_name] = deck
-            
+
             # Default deck for cards without sections
             if 'main' not in decks:
-                deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
-                
-        elif self.config.anki.deck_structure == "theme":
+
+        elif self.config.deck_structure == "theme":
             # Create subdecks by strategy/theme
             strategies = df['strategy'].dropna().unique()
-            
+
             for strategy in strategies:
                 if strategy and str(strategy).strip():
                     strategy_name = str(strategy).strip().replace('_', ' ').title()
                     deck_name = f"{self.config.deck_name}::{strategy_name}"
-                    deck_id = random.randrange(1 << 30, 1 << 31)
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
                     deck = genanki.Deck(deck_id, deck_name)
                     decks[strategy] = deck
-            
+
             # Default deck
             if 'main' not in decks:
-                deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
                 deck = genanki.Deck(deck_id, self.config.deck_name)
                 decks['main'] = deck
-                
+
+        elif self.config.deck_structure == "workflow":
+            # The default. Each card already carries its own fully-resolved
+            # deck name (e.g. "PDF2Anki::Readwise", "PDF2Anki::Articles",
+            # "PDF2Anki::Textbooks::SomeBook") - see generate_cards() /
+            # workflow_router.deck_subdeck_for_workflow() - so decks are
+            # keyed by that string directly rather than re-derived here.
+            deck_names = df['deck'].dropna().unique() if 'deck' in df.columns else []
+
+            for deck_name in deck_names:
+                deck_name = str(deck_name).strip()
+                if deck_name:
+                    deck_id = _stable_id(f"pdf2anki-deck:{deck_name}")
+                    deck = genanki.Deck(deck_id, deck_name)
+                    decks[deck_name] = deck
+
+            # Default deck for any card that somehow has no resolved deck
+            # (e.g. a GENERIC/unclassified document) - the base deck itself.
+            if 'main' not in decks:
+                deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
+                deck = genanki.Deck(deck_id, self.config.deck_name)
+                decks['main'] = deck
+
         else:  # PREDEFINED or fallback
             # Single deck with predefined structure
-            deck_id = self.config.deck_id or random.randrange(1 << 30, 1 << 31)
+            deck_id = self.config.deck_id or _stable_id(f"pdf2anki-deck:{self.config.deck_name}")
             deck = genanki.Deck(deck_id, self.config.deck_name)
             decks['main'] = deck
         
@@ -334,16 +236,21 @@ class AnkiDeckBuilder:
     def _get_deck_for_card(self, row: pd.Series, decks: Dict[str, genanki.Deck]) -> genanki.Deck:
         """Get the appropriate deck for a card based on deck structure."""
         
-        if self.config.anki.deck_structure == "chapter":
+        if self.config.deck_structure == "chapter":
             section = row.get('section')
             if section and str(section).strip() in decks:
                 return decks[str(section).strip()]
         
-        elif self.config.anki.deck_structure == "theme":
+        elif self.config.deck_structure == "theme":
             strategy = row.get('strategy')
             if strategy and str(strategy).strip() in decks:
                 return decks[str(strategy).strip()]
-        
+
+        elif self.config.deck_structure == "workflow":
+            deck_name = row.get('deck')
+            if deck_name and str(deck_name).strip() in decks:
+                return decks[str(deck_name).strip()]
+
         # Default to main deck
         return decks.get('main', list(decks.values())[0])
     
@@ -372,22 +279,25 @@ class AnkiDeckBuilder:
     
     def _create_basic_note(self, row: pd.Series, note_type: genanki.Model) -> genanki.Note:
         """Create a basic note."""
-        
+
         # Process LaTeX math if present
         front = self._process_math_content(str(row.get('front', '')))
         back = self._process_math_content(str(row.get('back', '')))
-        
+
         # Build source information
         source_info = self._build_source_info(row)
-        
+
         # Prepare tags
         tags = self._prepare_tags(row)
-        
+
+        image_html = build_image_html(row.get('media') or [])
+
         note = genanki.Note(
             model=note_type,
             fields=[
                 front,  # Front
                 back,   # Back
+                image_html,                  # Image
                 source_info['source'],      # Source
                 source_info['page'],        # Page
                 source_info['section'],     # Section
@@ -397,27 +307,30 @@ class AnkiDeckBuilder:
             tags=tags,
             guid=str(row.get('id', ''))
         )
-        
+
         return note
-    
+
     def _create_cloze_note(self, row: pd.Series, note_type: genanki.Model) -> genanki.Note:
         """Create a cloze deletion note."""
-        
+
         # Process LaTeX math in cloze text
         cloze_text = self._process_math_content(str(row.get('cloze_text', '')))
         extra = self._process_math_content(str(row.get('extra', '')))
-        
+
         # Build source information
         source_info = self._build_source_info(row)
-        
+
         # Prepare tags
         tags = self._prepare_tags(row)
-        
+
+        image_html = build_image_html(row.get('media') or [])
+
         note = genanki.Note(
             model=note_type,
             fields=[
                 cloze_text,  # Text
                 extra,       # Extra
+                image_html,             # Image
                 source_info['source'],  # Source
                 source_info['page'],    # Page
                 source_info['section'], # Section
@@ -426,7 +339,7 @@ class AnkiDeckBuilder:
             tags=tags,
             guid=str(row.get('id', ''))
         )
-        
+
         return note
     
     def _process_math_content(self, content: str) -> str:
@@ -439,9 +352,9 @@ class AnkiDeckBuilder:
         return content
     
     def _build_source_info(self, row: pd.Series) -> Dict[str, str]:
-        """Build source information for the note."""
-        
-        source_pdf = Path(str(row.get('source_pdf', ''))).name if row.get('source_pdf') else 'Unknown'
+        """Build source information for the note - see note_types.build_source_display()."""
+
+        source_pdf = build_source_display(row.get('source_pdf', ''), row.get('source_title', ''))
         page_start = row.get('page_start', '')
         page_end = row.get('page_end', '')
         section = str(row.get('section', '')) if row.get('section') else ''

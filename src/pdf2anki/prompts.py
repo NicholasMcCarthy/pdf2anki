@@ -57,6 +57,17 @@ class PromptManager:
     
     def render_template(self, template_name: str, **kwargs) -> str:
         """Render a template with the given variables."""
+        # basic_fields/cloze_fields (per-field LLM instructions from
+        # notes/*.yaml - see note_types.get_note_type_fields()) are normally
+        # supplied by BaseStrategy.generate_cards(), but any caller that
+        # renders a template directly (a smoke test, a CLI preview command)
+        # won't pass them. Templates access these with dict .get() chaining
+        # (e.g. basic_fields.get('front', {}).get('llm_instructions', ...)),
+        # which requires basic_fields/cloze_fields to at least be real dicts -
+        # an entirely-undefined top-level var raises before any .get() or
+        # `| default(...)` filter downstream gets a chance to apply.
+        kwargs.setdefault("basic_fields", {})
+        kwargs.setdefault("cloze_fields", {})
         template = self.get_template(template_name)
         return template.render(**kwargs)
     
@@ -102,6 +113,25 @@ Guidelines:
 3. Test understanding of visual concepts and their implications
 4. Include references to specific figures or tables
 5. Create cards that connect visual information to broader concepts""",
+
+    "highlight_priority": """You are an expert educational content creator specializing in converting a reader's own highlights and annotations into effective Anki flashcards. Your task is to ground each flashcard in text the reader specifically flagged as important, using surrounding page context only to disambiguate or fill gaps.
+
+Guidelines:
+1. Prioritize highlighted passages over any other content on the page
+2. Use the reader's own notes on a highlight (if present) to understand why it mattered to them
+3. Create clear, specific questions that test the highlighted concept
+4. Do not invent cards from unhighlighted page context alone
+5. Include page citations for reference
+6. If nothing highlighted is flashcard-worthy, return no cards rather than padding""",
+
+    "readwise_highlight": """You are an expert educational content creator specializing in converting saved web highlights (Readwise) into effective Anki flashcards. Your task is to ground each flashcard entirely in a single highlighted passage, using the reader's own note on it (if present) to understand its significance.
+
+Guidelines:
+1. Ground every card in the highlighted text - do not invent facts not present in it
+2. Create clear, specific questions that test the highlighted claim, definition, or fact
+3. Keep answers concise but complete
+4. If a highlight isn't fact-like or specific enough to support a good flashcard, return no cards rather than padding
+5. Do not fabricate page numbers or citations - the source is a URL, not a page""",
 
     "reviewer": """You are an expert educational content reviewer. Your task is to evaluate flashcard quality and suggest improvements. Focus on clarity, accuracy, educational value, and adherence to best practices for spaced repetition learning.
 

@@ -34,7 +34,7 @@ def save_csv(
         required_columns = [
             "id", "deck", "note_type", "tags", "media",
             "front", "back", "cloze_text", "extra",
-            "source_pdf", "page_start", "page_end", "section", "ref_citation",
+            "source_pdf", "source_title", "page_start", "page_end", "section", "ref_citation",
             "llm_model", "llm_version", "strategy", "template_version",
             "created_at", "updated_at", "core_concept", "longtext", 
             "original_text", "my_notes"
@@ -222,6 +222,53 @@ def find_pdf_files(paths: List[Path], patterns: List[str], recursive: bool = Tru
     
     logger.info(f"Found {len(pdf_files)} PDF files")
     return pdf_files
+
+
+def merge_cards_into_csv(new_cards: List[Dict[str, Any]], csv_path: Path) -> Dict[str, int]:
+    """Merge newly-generated card dicts into an existing cards CSV, deduped by
+    content-hash id, without disturbing cards already accumulated there from
+    other runs/files. Used by both `generate-readwise` and the watcher
+    service's runner, which both need to add to a shared deck incrementally
+    rather than overwrite it (unlike the batch-oriented `generate` command,
+    which processes every configured document in one pass and can safely
+    rebuild the CSV from scratch each time).
+    """
+    existing_rows: List[Dict[str, Any]] = []
+    if Path(csv_path).exists():
+        existing_rows = load_csv(csv_path).to_dict("records")
+
+    existing_ids = {row.get("id") for row in existing_rows}
+    added = [row for row in new_cards if row.get("id") not in existing_ids]
+    merged_rows = existing_rows + added
+
+    save_csv(merged_rows, csv_path)
+
+    return {"added": len(added), "total": len(merged_rows)}
+
+
+def find_markdown_files(paths: List[Path], patterns: Optional[List[str]] = None, recursive: bool = True) -> List[Path]:
+    """Find Readwise/markdown export files matching the given patterns."""
+    if patterns is None:
+        patterns = ["*.md", "*.markdown"]
+
+    md_files = []
+
+    for path in paths:
+        path = Path(path)
+
+        if path.is_file() and path.suffix.lower() in (".md", ".markdown"):
+            md_files.append(path)
+        elif path.is_dir():
+            for pattern in patterns:
+                if recursive:
+                    md_files.extend(path.rglob(pattern))
+                else:
+                    md_files.extend(path.glob(pattern))
+
+    md_files = sorted(set(md_files))
+
+    logger.info(f"Found {len(md_files)} markdown files")
+    return md_files
 
 
 def clear_cache() -> int:
