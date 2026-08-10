@@ -72,6 +72,123 @@ def test_none_directories_are_filtered_out():
     assert watcher.directories == [Path("/some/path")]
 
 
+def test_state_persists_across_simulated_restart(tmp_path):
+    (tmp_path / "a.pdf").write_bytes(b"a")
+    (tmp_path / "b.md").write_text("# B")
+    state_path = tmp_path / "state.json"
+
+    processed1 = []
+    watcher1 = DirectoryWatcher(
+        directories=[tmp_path], on_file=processed1.append, state_path=state_path
+    )
+    watcher1.reconcile()
+    assert {p.name for p in processed1} == {"a.pdf", "b.md"}
+    assert state_path.exists()
+
+    # A brand-new DirectoryWatcher instance pointed at the same state_path
+    # (simulating a container restart) should not reprocess unchanged files.
+    processed2 = []
+    watcher2 = DirectoryWatcher(
+        directories=[tmp_path], on_file=processed2.append, state_path=state_path
+    )
+    watcher2.reconcile()
+    assert processed2 == []
+
+    # But a genuinely new file should still be picked up.
+    time.sleep(0.01)
+    (tmp_path / "c.pdf").write_bytes(b"c")
+    watcher2.reconcile()
+    assert {p.name for p in processed2} == {"c.pdf"}
+
+
+def test_state_persists_touched_file_gets_reprocessed(tmp_path):
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"v1")
+    state_path = tmp_path / "state.json"
+
+    processed1 = []
+    DirectoryWatcher(
+        directories=[tmp_path], on_file=processed1.append, state_path=state_path
+    ).reconcile()
+    assert processed1 == [path]
+
+    time.sleep(0.01)
+    path.write_bytes(b"v2 - touched")  # mtime changes
+
+    processed2 = []
+    watcher2 = DirectoryWatcher(
+        directories=[tmp_path], on_file=processed2.append, state_path=state_path
+    )
+    watcher2.reconcile()
+    assert processed2 == [path]
+
+
+def test_load_state_tolerates_missing_or_corrupt_file(tmp_path):
+    state_path = tmp_path / "state.json"
+
+    # Missing file - fine, starts empty.
+    watcher = DirectoryWatcher(directories=[tmp_path], on_file=lambda p: None, state_path=state_path)
+    assert watcher._processed == {}
+
+    # Corrupt file - tolerated, logged, starts empty rather than crashing.
+    state_path.write_text("not valid json{{{")
+    watcher2 = DirectoryWatcher(directories=[tmp_path], on_file=lambda p: None, state_path=state_path)
+    assert watcher2._processed == {}
+
+
+def test_reset_state_clears_memory_and_disk_and_triggers_reprocessing(tmp_path):
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"a")
+    state_path = tmp_path / "state.json"
+
+    processed = []
+    watcher = DirectoryWatcher(
+        directories=[tmp_path], on_file=processed.append, state_path=state_path
+    )
+    watcher.reconcile()
+    assert processed == [path]
+    assert state_path.exists()
+
+    watcher.reset_state()
+    assert watcher._processed == {}
+    assert not state_path.exists()
+
+    # Next reconciliation reprocesses everything, since nothing is "seen" anymore.
+    watcher.reconcile()
+    assert processed == [path, path]
+
+
+def test_failed_handle_is_not_marked_seen_and_is_retried(tmp_path):
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"a")
+    state_path = tmp_path / "state.json"
+
+    calls = []
+    fail = {"on": True}
+
+    def flaky(p):
+        calls.append(p)
+        if fail["on"]:
+            raise RuntimeError("boom")
+
+    watcher = DirectoryWatcher(directories=[tmp_path], on_file=flaky, state_path=state_path)
+    watcher.handle(path)  # fails - must not raise, must not persist as seen
+    assert len(calls) == 1
+    assert watcher._processed == {}
+    assert not state_path.exists()
+
+    # Next attempt succeeds and is now recorded.
+    fail["on"] = False
+    watcher.handle(path)
+    assert len(calls) == 2
+    assert watcher._processed.get(str(path)) is not None
+    assert state_path.exists()
+
+    # A further handle() with unchanged mtime is now a no-op.
+    watcher.handle(path)
+    assert len(calls) == 2
+
+
 def test_live_watchdog_event_triggers_on_file(tmp_path):
     processed = []
     watcher = DirectoryWatcher(

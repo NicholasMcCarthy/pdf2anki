@@ -816,6 +816,11 @@ def generate_readwise(
 def serve(
     config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
+    reset_state: bool = typer.Option(
+        False, "--reset-state",
+        help="Forget every previously-processed file before starting, so the startup scan "
+             "reprocesses everything found in the watch directories.",
+    ),
 ) -> None:
     """Run the watcher service: watch configured directories for new PDFs/
     textbooks/Readwise markdown files, classify and process each one, keep
@@ -835,6 +840,14 @@ def serve(
 
     config = Config.from_yaml(config_path)
     webhook_url = config.service.notifications.slack_webhook_url
+
+    # Defaults into the workspace dir (already a persistent volume in the
+    # Docker deployment) so which files have been processed survives
+    # container restarts/rebuilds - see config.py::Service.state_path.
+    state_path = (
+        Path(config.service.state_path) if config.service.state_path
+        else Path(config.output.workspace) / "watcher_state.json"
+    )
 
     console.print("🔭 Starting pdf2anki watcher service...", style="bold blue")
     watch_dirs = {
@@ -864,13 +877,23 @@ def serve(
                 console.print_exception()
             if config.service.notifications.notify_on_error:
                 notify_error(webhook_url, str(path), str(e))
+            # Re-raise (DirectoryWatcher.handle() catches this itself, so it
+            # never crashes the watch loop) so a failed file is NOT recorded
+            # as seen - it gets retried on the next reconciliation pass
+            # instead of being silently skipped forever now that seen-state
+            # persists across restarts.
+            raise
 
     watcher = DirectoryWatcher(
         directories=[watch_dirs["pdfs"], watch_dirs["textbooks"], watch_dirs["readwise"]],
         on_file=on_file,
         debounce_seconds=config.service.debounce_seconds,
+        state_path=state_path,
         poll_interval_seconds=config.service.poll_interval_seconds,
     )
+    if reset_state:
+        console.print("♻️  --reset-state: forgetting all previously-processed files")
+        watcher.reset_state()
     watcher.run_forever()
 
 

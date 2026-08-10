@@ -412,6 +412,15 @@ class Service:
     watch_dirs: WatchDirs = field(default_factory=WatchDirs)
     poll_interval_seconds: int = 300  # periodic reconciliation fallback
     debounce_seconds: float = 5.0
+    # Persists which files have already been processed (path -> mtime) across
+    # restarts/rebuilds, so the startup reconciliation scan doesn't re-run
+    # the full (LLM-calling) pipeline on files it already handled - only
+    # genuinely new or modified (e.g. explicitly `touch`ed) files get
+    # reprocessed. Defaults to a file inside Output.workspace (already a
+    # persistent volume in the Docker deployment) - see cli.py's `serve`
+    # command. Set to null/empty to disable persistence (in-memory only,
+    # the old behavior - every restart reprocesses everything found).
+    state_path: Optional[str] = None
     ankiconnect: AnkiConnectSettings = field(default_factory=AnkiConnectSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
 

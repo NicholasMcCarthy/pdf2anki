@@ -4,11 +4,12 @@ plus an initial startup catch-up scan and a periodic full reconciliation scan
 (protects against missed filesystem events on some mounted/network volumes -
 a known watchdog gotcha, especially relevant for Docker bind mounts)."""
 
+import json
 import logging
 import time
 from pathlib import Path
 from threading import Timer
-from typing import Callable, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Optional
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -69,6 +70,16 @@ class DirectoryWatcher:
     """Watches a set of directories, calling on_file(path) for each new/changed
     watched file - deduplicated by (path, mtime) so a file isn't reprocessed
     on every reconciliation pass unless it has actually changed since last seen.
+
+    Without `state_path`, that dedup memory is in-process only - a container
+    restart starts with nothing seen, so the startup reconciliation scan
+    (see start()) treats every already-processed file as new again and
+    reruns the full (LLM-calling) pipeline on all of them. Passing
+    `state_path` persists the seen-file map to a JSON file after every
+    successful handle(), so a restart resumes from where it left off and
+    only genuinely new or modified (mtime-changed - e.g. explicitly
+    `touch`ed) files get reprocessed. Use reset_state() (or delete the file)
+    for an explicit "reprocess everything" - see `pdf2anki serve --reset-state`.
     """
 
     def __init__(
@@ -77,19 +88,59 @@ class DirectoryWatcher:
         on_file: Callable[[Path], None],
         debounce_seconds: float = 5.0,
         poll_interval_seconds: int = 300,
+        state_path: Optional[Path] = None,
     ):
         self.directories = [Path(d) for d in directories if d]
         self.on_file = on_file
         self.debounce_seconds = debounce_seconds
         self.poll_interval_seconds = poll_interval_seconds
-        self._processed: Set[str] = set()
+        self.state_path = Path(state_path) if state_path else None
+        self._processed: Dict[str, int] = self._load_state()
         self._observer: Optional[Observer] = None
 
     def _seen_key(self, path: Path) -> str:
+        return str(path)
+
+    def _current_mtime_ns(self, path: Path) -> Optional[int]:
         try:
-            return f"{path}:{path.stat().st_mtime_ns}"
+            return path.stat().st_mtime_ns
         except OSError:
-            return f"{path}:missing"
+            return None
+
+    def _load_state(self) -> Dict[str, int]:
+        if not self.state_path or not self.state_path.exists():
+            return {}
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {str(k): int(v) for k, v in data.items()}
+        except Exception as e:
+            logger.warning(f"Failed to load watcher state from {self.state_path}, starting fresh: {e}")
+        return {}
+
+    def _save_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._processed, f)
+            tmp_path.replace(self.state_path)  # atomic on POSIX - avoids a truncated file on crash
+        except Exception as e:
+            logger.warning(f"Failed to persist watcher state to {self.state_path}: {e}")
+
+    def reset_state(self) -> None:
+        """Forget every previously-seen file, in memory and (if configured)
+        on disk - the next reconciliation scan reprocesses everything found.
+        See `pdf2anki serve --reset-state`."""
+        self._processed = {}
+        if self.state_path and self.state_path.exists():
+            try:
+                self.state_path.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to remove watcher state file {self.state_path}: {e}")
 
     def handle(self, path: Path) -> None:
         """Process one file if it hasn't been seen at its current mtime yet.
@@ -97,13 +148,20 @@ class DirectoryWatcher:
         loop) so callers can feed it a specific path directly, e.g. for tests.
         """
         key = self._seen_key(path)
-        if key in self._processed:
+        mtime_ns = self._current_mtime_ns(path)
+        if mtime_ns is not None and self._processed.get(key) == mtime_ns:
             return
-        self._processed.add(key)
         try:
             self.on_file(path)
         except Exception as e:
             logger.error(f"Error processing {path}: {e}")
+            return
+        # Only recorded as "seen" after on_file() succeeds, so a failed
+        # attempt gets retried on the next reconciliation pass rather than
+        # being silently skipped forever.
+        if mtime_ns is not None:
+            self._processed[key] = mtime_ns
+            self._save_state()
 
     def reconcile(self) -> None:
         """Run one full directory scan, handling anything not yet processed."""

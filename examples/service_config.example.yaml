@@ -39,6 +39,17 @@ service:
   poll_interval_seconds: 300      # periodic full reconciliation scan fallback
   debounce_seconds: 5.0           # wait for a file to stop changing before processing
 
+  # Persists which files have already been processed (path -> mtime) so
+  # restarting/rebuilding the container doesn't reprocess every file the
+  # startup reconciliation scan finds - only genuinely new or modified
+  # (e.g. explicitly `touch`ed) files run through the (LLM-calling) pipeline
+  # again. Defaults to <output.workspace>/watcher_state.json (already a
+  # persistent volume below via the compose ./workspace mount), so you
+  # normally don't need to set this. Force a full reprocess of everything
+  # without editing this file via `pdf2anki serve --reset-state`, or wipe the
+  # state file by hand.
+  # state_path: /home/pdf2anki/workspace/watcher_state.json
+
   # AnkiWeb has no public upload API - AnkiConnect (talking to a real, running
   # Anki instance already logged into AnkiWeb) is the only realistic way to
   # push new cards there automatically. docker-compose.yml bundles a headless
