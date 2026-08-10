@@ -812,14 +812,31 @@ def generate_readwise(
         raise typer.Exit(code=1)
 
 
+def _resolve_state_path(config: Config) -> Path:
+    """Where the watcher's seen-file state (see service/watcher.py::WatcherState)
+    lives - defaults into the workspace dir (already a persistent volume in
+    the Docker deployment) so it survives container restarts/rebuilds, but
+    is overridable via Service.state_path."""
+    return (
+        Path(config.service.state_path) if config.service.state_path
+        else Path(config.output.workspace) / "watcher_state.json"
+    )
+
+
 @app.command()
 def serve(
     config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose output"),
     reset_state: bool = typer.Option(
         False, "--reset-state",
-        help="Forget every previously-processed file before starting, so the startup scan "
-             "reprocesses everything found in the watch directories.",
+        help="Forget every previously-processed file (successes AND errors) before starting, "
+             "so the startup scan reprocesses everything found in the watch directories.",
+    ),
+    retry_errors: bool = typer.Option(
+        False, "--retry-errors",
+        help="Forget only files that previously errored (leaving already-succeeded files alone) "
+             "before starting, so the startup scan retries them. Errored files are never "
+             "auto-retried otherwise - see `pdf2anki watch-status` to inspect them first.",
     ),
 ) -> None:
     """Run the watcher service: watch configured directories for new PDFs/
@@ -840,14 +857,7 @@ def serve(
 
     config = Config.from_yaml(config_path)
     webhook_url = config.service.notifications.slack_webhook_url
-
-    # Defaults into the workspace dir (already a persistent volume in the
-    # Docker deployment) so which files have been processed survives
-    # container restarts/rebuilds - see config.py::Service.state_path.
-    state_path = (
-        Path(config.service.state_path) if config.service.state_path
-        else Path(config.output.workspace) / "watcher_state.json"
-    )
+    state_path = _resolve_state_path(config)
 
     console.print("🔭 Starting pdf2anki watcher service...", style="bold blue")
     watch_dirs = {
@@ -878,10 +888,14 @@ def serve(
             if config.service.notifications.notify_on_error:
                 notify_error(webhook_url, str(path), str(e))
             # Re-raise (DirectoryWatcher.handle() catches this itself, so it
-            # never crashes the watch loop) so a failed file is NOT recorded
-            # as seen - it gets retried on the next reconciliation pass
-            # instead of being silently skipped forever now that seen-state
-            # persists across restarts.
+            # never crashes the watch loop) so the failure reaches handle(),
+            # which records it as an error rather than a success. Errored
+            # files are then skipped - not silently retried - on every
+            # future reconciliation pass, so a persistent failure (e.g.
+            # exhausted API credits) doesn't burn credits retrying the same
+            # doomed call against every matching file every poll interval.
+            # Use --retry-errors (or `pdf2anki watch-status --retry-errors`)
+            # once the underlying problem is fixed.
             raise
 
     watcher = DirectoryWatcher(
@@ -894,7 +908,65 @@ def serve(
     if reset_state:
         console.print("♻️  --reset-state: forgetting all previously-processed files")
         watcher.reset_state()
+    elif retry_errors:
+        cleared = watcher.retry_errors()
+        console.print(f"♻️  --retry-errors: cleared {cleared} errored file(s) for retry")
     watcher.run_forever()
+
+
+@app.command(name="watch-status")
+def watch_status(
+    config_path: Path = typer.Option(..., "--config", "-c", help="Path to configuration file"),
+    show_errors: bool = typer.Option(True, "--errors/--no-errors", help="List errored files and their error message."),
+    show_processed: bool = typer.Option(False, "--processed", help="Also list successfully-processed files."),
+    retry_errors: bool = typer.Option(
+        False, "--retry-errors",
+        help="Clear error state so the next `pdf2anki serve` run retries these files "
+             "(does not itself reprocess anything - just clears the 'don't retry' marker).",
+    ),
+    path: Optional[Path] = typer.Option(
+        None, "--path", help="Limit --retry-errors to just this one file (default: all errored files).",
+    ),
+) -> None:
+    """Inspect (and optionally clear) the watcher service's persisted
+    seen-file state (service/watcher.py::WatcherState) without starting the
+    full `pdf2anki serve` watch loop - useful for checking what errored
+    (e.g. after API credits ran out) before deciding whether/what to retry.
+    """
+    from .service import WatcherState
+
+    config = Config.from_yaml(config_path)
+    state_path = _resolve_state_path(config)
+    state = WatcherState(state_path)
+
+    if retry_errors:
+        cleared = state.retry_errors([path] if path else None)
+        console.print(f"♻️  Cleared {cleared} errored file(s) - they'll be retried on the next `pdf2anki serve` run.")
+        return
+
+    console.print(f"📄 Watcher state: {state_path}")
+    errors = state.errors()
+    successes = state.successes()
+    console.print(f"  ✅ {len(successes)} processed successfully")
+    console.print(f"  ❌ {len(errors)} errored" + (" (not auto-retried)" if errors else ""))
+
+    if show_errors and errors:
+        table = Table(title="Errored files")
+        table.add_column("Path")
+        table.add_column("Attempts")
+        table.add_column("Last error")
+        for file_path, entry in sorted(errors.items()):
+            table.add_row(file_path, str(entry.get("attempts", "?")), str(entry.get("error", ""))[:200])
+        console.print(table)
+        console.print("Retry with: pdf2anki watch-status --config ... --retry-errors [--path <file>]")
+
+    if show_processed and successes:
+        table = Table(title="Processed files")
+        table.add_column("Path")
+        table.add_column("Attempts")
+        for file_path, entry in sorted(successes.items()):
+            table.add_row(file_path, str(entry.get("attempts", "?")))
+        console.print(table)
 
 
 def _run_full_generation(documents: dict, base_config: Config, documents_config: DocumentsConfig, verbose: bool, prompt_manager=None, note_type_manager=None) -> None:
